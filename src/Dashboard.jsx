@@ -1,11 +1,12 @@
 // Dashboard.jsx
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, Brush
+  LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, Brush, ReferenceLine
 } from "recharts";
 import Papa from "papaparse";
 import { saveAs } from "file-saver";
 import html2canvas from "html2canvas";
+import EventLog from "./EventLog";
 
 /* ========== CONFIG ========== */
 const SHEET_ID = "1C2BWZbJ1HJzzqkIuHrvH8OnrT9PbFKVCdaD-40jj9bw";
@@ -80,98 +81,259 @@ const SmallCard = React.memo(function SmallCard({ label, value, unit, big }) {
    CHART SECTION
    Now accepts `filter` prop to fade non-selected series.
 ===================================================================== */
+ 
+/** IQR-based outlier removal. Returns [lo, hi] clean bounds. */
+function cleanBounds(values, margin = 0.05) {
+  const sorted = [...values].filter(v => v !== null && v !== undefined && !isNaN(v) && v > 0).sort((a, b) => a - b);
+  if (sorted.length < 4) return [0, "auto"];
+  const q1 = sorted[Math.floor(sorted.length * 0.25)];
+  const q3 = sorted[Math.floor(sorted.length * 0.75)];
+  const iqr = q3 - q1;
+  const lo = q1 - 1.5 * iqr;
+  const hi = q3 + 1.5 * iqr;
+  const clean = sorted.filter(v => v >= lo && v <= hi);
+  if (!clean.length) return [0, "auto"];
+  const min = clean[0];
+  const max = clean[clean.length - 1];
+  const pad = (max - min) * margin || 1;
+  return [+(min - pad).toFixed(2), +(max + pad).toFixed(2)];
+}
+ 
+/* Custom tooltip ------------------------------------------------- */
+const CustomTooltip = ({ active, payload, label }) => {
+  if (!active || !payload?.length) return null;
+  return (
+    <div style={{
+      background: "rgba(15,23,42,0.92)",
+      border: "1px solid rgba(99,102,241,0.4)",
+      borderRadius: 10,
+      padding: "10px 14px",
+      fontSize: 12,
+      color: "#e2e8f0",
+      boxShadow: "0 4px 24px rgba(0,0,0,0.4)"
+    }}>
+      <p style={{ color: "#94a3b8", marginBottom: 6, fontWeight: 600 }}>{label}</p>
+      {payload.map((p) => (
+        <div key={p.dataKey} style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 3 }}>
+          <span style={{ width: 10, height: 10, borderRadius: "50%", background: p.color, display: "inline-block" }} />
+          <span style={{ color: "#cbd5e1" }}>{p.name}:</span>
+          <span style={{ fontWeight: 700, color: "#f1f5f9" }}>
+            {p.value !== null && p.value !== undefined ? Number(p.value).toFixed(3) : "—"}
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+};
+ 
+/* ─── Charts component ─────────────────────────────────────── */
 const Charts = React.memo(function Charts({ type, data, filter = "all" }) {
+ 
+  // ── zoom state: [lo, hi] overrides auto domain when set ──
+  const [zoomDomain, setZoomDomain] = useState(null); // null = auto
+  const zoomRef = useRef(zoomDomain);
+  zoomRef.current = zoomDomain;
+ 
+  // ── chart data ────────────────────────────────────────────
   const chartData = useMemo(() => data.map(d => ({
-    time: new Date(d.t).toLocaleTimeString(),
-    Va: d.Va, Vb: d.Vb, Vc: d.Vc,
-    Ia: d.Ia, Ib: d.Ib, Ic: d.Ic
+    time: new Date(d.t).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", second: "2-digit" }),
+    Va: d.Va > 0 && d.Va < 500 ? d.Va : null,
+    Vb: d.Vb > 0 && d.Vb < 500 ? d.Vb : null,
+    Vc: d.Vc > 0 && d.Vc < 500 ? d.Vc : null,
+    Ia: d.Ia >= 0 && d.Ia < 100 ? d.Ia : null,
+    Ib: d.Ib >= 0 && d.Ib < 100 ? d.Ib : null,
+    Ic: d.Ic >= 0 && d.Ic < 100 ? d.Ic : null,
   })), [data]);
-
-  // decide opacity for keys (show selected at 1, others at 0.2)
+ 
+  // ── compute smart Y domain from clean data ────────────────
+  const autoDomain = useMemo(() => {
+    if (!chartData.length) return [0, "auto"];
+    if (type === "voltage") {
+      const vals = chartData.flatMap(d => [d.Va, d.Vb, d.Vc]).filter(Boolean);
+      return cleanBounds(vals, 0.08);
+    } else {
+      const vals = chartData.flatMap(d => [d.Ia, d.Ib, d.Ic]).filter(v => v !== null);
+      if (!vals.length) return [0, 10];
+      return cleanBounds(vals, 0.12);
+    }
+  }, [chartData, type]);
+ 
+  const yDomain = zoomDomain ?? autoDomain;
+ 
+  // ── mouse wheel zoom on the chart ────────────────────────
+  const handleWheel = useCallback((e) => {
+    e.preventDefault();
+    const [lo, hi] = zoomRef.current ?? autoDomain;
+    const range = hi - lo;
+    const center = (lo + hi) / 2;
+    const factor = e.deltaY < 0 ? 0.85 : 1.18; // scroll up = zoom in
+    const newRange = range * factor;
+    const newLo = +(center - newRange / 2).toFixed(3);
+    const newHi = +(center + newRange / 2).toFixed(3);
+    setZoomDomain([newLo, newHi]);
+  }, [autoDomain]);
+ 
+  // ── shift+drag to pan ────────────────────────────────────
+  const dragRef = useRef({ active: false, startY: 0, startDomain: null });
+ 
+  const handleMouseDown = useCallback((e) => {
+    if (!e.shiftKey) return;
+    e.preventDefault();
+    dragRef.current = {
+      active: true,
+      startY: e.clientY,
+      startDomain: zoomRef.current ?? autoDomain
+    };
+  }, [autoDomain]);
+ 
+  const handleMouseMove = useCallback((e) => {
+    const drag = dragRef.current;
+    if (!drag.active) return;
+    const [lo, hi] = drag.startDomain;
+    const range = hi - lo;
+    const pixelDelta = drag.startY - e.clientY; // up = positive
+    const valueDelta = (pixelDelta / 250) * range; // 250px ≈ full range
+    setZoomDomain([
+      +(lo + valueDelta).toFixed(3),
+      +(hi + valueDelta).toFixed(3)
+    ]);
+  }, []);
+ 
+  const handleMouseUp = useCallback(() => {
+    dragRef.current.active = false;
+  }, []);
+ 
+  // ── opacity for filter ───────────────────────────────────
   const opacityFor = (key) => {
     if (!filter || filter === "all") return 1;
-    return filter === key ? 1 : 0.2;
+    return filter === key ? 1 : 0.15;
   };
-
+ 
+  // ── reference line value ─────────────────────────────────
+  const refValue = type === "voltage" ? 230 : null;
+ 
+  // ── Y-axis tick formatter ────────────────────────────────
+  const yTickFmt = (v) => {
+    if (typeof v !== "number") return v;
+    return type === "voltage" ? `${v.toFixed(1)}V` : `${v.toFixed(3)}A`;
+  };
+ 
+  // ── colors ───────────────────────────────────────────────
+  const colors = type === "voltage"
+    ? { a: "#3b82f6", b: "#06b6d4", c: "#f59e0b" }
+    : { a: "#3b82f6", b: "#06b6d4", c: "#f59e0b" };
+ 
+  const unit = type === "voltage" ? "V" : "A";
+  const [ka, kb, kc] = type === "voltage" ? ["Va", "Vb", "Vc"] : ["Ia", "Ib", "Ic"];
+  const [na, nb, nc] = type === "voltage" ? ["V_R", "V_Y", "V_B"] : ["I_R", "I_Y", "I_B"];
+ 
   return (
-    <ResponsiveContainer width="100%" height={330}>
-      <LineChart data={chartData}>
-        <CartesianGrid strokeDasharray="3 3" stroke="#94a3b8" opacity={0.2} />
-        <XAxis dataKey="time" stroke="#64748b" minTickGap={20} />
-        <YAxis
-  stroke="#64748b"
-  domain={type === "voltage" ? [230, 240] : ["auto", "auto"]}
-/>
-        <Tooltip contentStyle={{ backgroundColor: "rgba(255,255,255,0.8)", borderRadius: 10 }} />
-        <Legend />
-
-        {type === "voltage" ? (
+    <div style={{ position: "relative" }}>
+      {/* Zoom controls */}
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
+        <span style={{ fontSize: 11, color: "#94a3b8" }}>
+          🖱 Scroll to zoom Y-axis · Shift+drag to pan
+        </span>
+        {zoomDomain && (
           <>
-            <Line type="monotone" dataKey="Va" stroke="#3b82f6" strokeWidth={3} dot={false} name="V_R" strokeOpacity={opacityFor("Va")} />
-            <Line type="monotone" dataKey="Vb" stroke="#06b6d4" strokeWidth={3} dot={false} name="V_Y" strokeOpacity={opacityFor("Vb")} />
-            <Line type="monotone" dataKey="Vc" stroke="#f59e0b" strokeWidth={3} dot={false} name="V_B" strokeOpacity={opacityFor("Vc")} />
-          </>
-        ) : (
-          <>
-            <Line type="monotone" dataKey="Ia" stroke="#3b82f6" strokeWidth={3} dot={false} name="I_R" strokeOpacity={opacityFor("Ia")} />
-            <Line type="monotone" dataKey="Ib" stroke="#06b6d4" strokeWidth={3} dot={false} name="I_Y" strokeOpacity={opacityFor("Ib")} />
-            <Line type="monotone" dataKey="Ic" stroke="#f59e0b" strokeWidth={3} dot={false} name="I_B" strokeOpacity={opacityFor("Ic")} />
-          </>
-        )}
-
-        <Brush dataKey="time" height={26} stroke="#6366f1" />
-      </LineChart>
-    </ResponsiveContainer>
-  );
-});
-
-/* =====================================================================
-   EVENT LOG
-===================================================================== */
-function EventLog({ events, collapsed, setCollapsed }) {
-  return (
-    <div className="
-      rounded-2xl p-6 
-      bg-white/10 dark:bg-white/5 
-      border border-white/20 backdrop-blur-xl
-      shadow-xl flex flex-col h-full
-    ">
-      <div className="flex items-center justify-between mb-4">
-        <h3 className="text-lg font-black text-transparent bg-clip-text bg-gradient-to-r from-blue-500 to-purple-600">
-          Event Log
-        </h3>
-
-        <button
-          onClick={() => setCollapsed(!collapsed)}
-          className="px-3 py-1 text-sm rounded-lg bg-slate-300 dark:bg-slate-800 hover:bg-slate-600 transition"
-        >
-          {collapsed ? "Show" : "Hide"}
-        </button>
-      </div>
-
-      <div
-        className={`
-          transition-all overflow-y-auto 
-          ${collapsed ? "max-h-0 opacity-0" : "max-h-[600px] opacity-100"}
-        `}
-      >
-        {events.length === 0 ? (
-          <p className="text-slate-300 dark:text-slate-400">No events yet.</p>
-        ) : (
-          events.map((e, i) => (
-            <div
-              key={i}
-              className="bg-emerald-100/40 dark:bg-emerald-300/10 p-4 rounded-lg border-l-4 border-emerald-500 mb-3"
+            <span style={{
+              fontSize: 11, fontWeight: 700, color: "#6366f1",
+              background: "rgba(99,102,241,0.12)", borderRadius: 6, padding: "2px 8px"
+            }}>
+              Y: {zoomDomain[0]}{unit} – {zoomDomain[1]}{unit}
+            </span>
+            <button
+              onClick={() => setZoomDomain(null)}
+              style={{
+                fontSize: 11, cursor: "pointer",
+                background: "rgba(239,68,68,0.15)", color: "#f87171",
+                border: "1px solid rgba(239,68,68,0.3)", borderRadius: 6,
+                padding: "2px 8px", fontWeight: 600
+              }}
             >
-              <p className="text-emerald-700 dark:text-emerald-300 font-medium">{e.msg}</p>
-              <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">{e.timestamp}</p>
-            </div>
-          ))
+              Reset Zoom
+            </button>
+          </>
         )}
+      </div>
+ 
+      <div
+        onWheel={handleWheel}
+        onMouseDown={handleMouseDown}
+        onMouseMove={handleMouseMove}
+        onMouseUp={handleMouseUp}
+        onMouseLeave={handleMouseUp}
+        style={{ cursor: "crosshair", userSelect: "none" }}
+      >
+        <ResponsiveContainer width="100%" height={340}>
+          <LineChart data={chartData} margin={{ top: 8, right: 16, bottom: 4, left: 10 }}>
+            <CartesianGrid strokeDasharray="3 3" stroke="#94a3b8" opacity={0.18} />
+ 
+            <XAxis
+              dataKey="time"
+              stroke="#64748b"
+              tick={{ fontSize: 11, fill: "#94a3b8" }}
+              minTickGap={40}
+              tickLine={false}
+              label={{ value: "Time", position: "insideBottomRight", offset: -4, fill: "#64748b", fontSize: 11 }}
+            />
+ 
+            <YAxis
+              stroke="#64748b"
+              domain={yDomain}
+              tickFormatter={yTickFmt}
+              tick={{ fontSize: 11, fill: "#94a3b8" }}
+              tickCount={7}
+              tickLine={false}
+              width={62}
+              label={{
+                value: type === "voltage" ? "Voltage (V)" : "Current (A)",
+                angle: -90,
+                position: "insideLeft",
+                fill: "#64748b",
+                fontSize: 11,
+                dy: 50
+              }}
+            />
+ 
+            <Tooltip content={<CustomTooltip />} />
+            <Legend
+              wrapperStyle={{ fontSize: 12, paddingTop: 4 }}
+              formatter={(value) => <span style={{ color: "#94a3b8" }}>{value}</span>}
+            />
+ 
+            {refValue && (
+              <ReferenceLine
+                y={refValue}
+                stroke="#22c55e"
+                strokeDasharray="6 3"
+                strokeWidth={1.5}
+                label={{ value: `${refValue}V nominal`, position: "right", fontSize: 10, fill: "#22c55e" }}
+              />
+            )}
+ 
+            <Line type="monotone" dataKey={ka} stroke={colors.a} strokeWidth={2.5} dot={false}
+              name={na} strokeOpacity={opacityFor(ka)} connectNulls={false} />
+            <Line type="monotone" dataKey={kb} stroke={colors.b} strokeWidth={2.5} dot={false}
+              name={nb} strokeOpacity={opacityFor(kb)} connectNulls={false} />
+            <Line type="monotone" dataKey={kc} stroke={colors.c} strokeWidth={2.5} dot={false}
+              name={nc} strokeOpacity={opacityFor(kc)} connectNulls={false} />
+ 
+            <Brush
+              dataKey="time"
+              height={28}
+              stroke="#6366f1"
+              fill="rgba(99,102,241,0.08)"
+              travellerWidth={8}
+              tickFormatter={(v) => v}
+            />
+          </LineChart>
+        </ResponsiveContainer>
       </div>
     </div>
   );
-}
+});
+
 
 /* =====================================================================
    🔧 FIXED EXPORT FUNCTIONS (ONLY CODE MODIFIED)
@@ -336,9 +498,9 @@ export default function Dashboard() {
 
       if (changed && hasData) {
         setEvents(prev => [
-          { msg: "Data updated", timestamp: newData.Timestamp },
-          ...prev
-        ].slice(0, MAX_EVENTS));
+  { msg: "Data updated", time: Date.now(), level: "success" },
+  ...prev
+].slice(0, MAX_EVENTS));
       }
 
       setData(newData);
@@ -461,7 +623,7 @@ export default function Dashboard() {
       </header>
 
       {/* Layout */}
-      <main className="grid grid-cols-1 lg:grid-cols-4 gap-6">
+      <main className="grid grid-cols-1 lg:grid-cols-4 gap-6 items-stretch">
 
         <section className="lg:col-span-3 space-y-6">
 
@@ -549,9 +711,9 @@ export default function Dashboard() {
 
         </section>
 
-        <aside className="lg:col-span-1">
-          <EventLog events={events} collapsed={collapsed} setCollapsed={setCollapsed} />
-        </aside>
+       <aside className="lg:col-span-1 flex flex-col">
+  <EventLog events={events} />
+</aside>
 
       </main>
     </div>
