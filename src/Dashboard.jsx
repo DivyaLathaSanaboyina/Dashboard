@@ -9,11 +9,13 @@ import html2canvas from "html2canvas";
 
 /* ========== CONFIG ========== */
 const SHEET_ID = "1C2BWZbJ1HJzzqkIuHrvH8OnrT9PbFKVCdaD-40jj9bw";
-const CSV_URL = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/export?format=csv&gid=0`;
+
+const CSV_URL =
+"https://docs.google.com/spreadsheets/d/1C2BWZbJ1HJzzqkIuHrvH8OnrT9PbFKVCdaD-40jj9bw/gviz/tq?tqx=out:csv&gid=0";
 const POLL_INTERVAL = 5000;
 const MAX_HISTORY = 500;
 const MAX_EVENTS = 15;
-
+ 
 /* ========== HELPERS ========== */
 const formatTS = (raw) => {
   if (!raw) return "";
@@ -96,7 +98,10 @@ const Charts = React.memo(function Charts({ type, data, filter = "all" }) {
       <LineChart data={chartData}>
         <CartesianGrid strokeDasharray="3 3" stroke="#94a3b8" opacity={0.2} />
         <XAxis dataKey="time" stroke="#64748b" minTickGap={20} />
-        <YAxis stroke="#64748b" />
+        <YAxis
+  stroke="#64748b"
+  domain={type === "voltage" ? [230, 240] : ["auto", "auto"]}
+/>
         <Tooltip contentStyle={{ backgroundColor: "rgba(255,255,255,0.8)", borderRadius: 10 }} />
         <Legend />
 
@@ -175,29 +180,60 @@ const exportPNG = async () => {
   const el = document.getElementById("chartCapture");
   if (!el) return alert("Voltage chart not ready!");
 
-  await new Promise(res => setTimeout(res, 200));
-
-  html2canvas(el, {
+  const canvas = await html2canvas(el, {
     scale: 2,
     backgroundColor: "#ffffff",
-    useCORS: true
-  }).then(canvas => {
-    canvas.toBlob(blob => saveAs(blob, `voltage_chart_${Date.now()}.png`));
+    useCORS: true,
+
+    onclone: (doc) => {
+      const cloned = doc.getElementById("chartCapture");
+
+      // ✅ HIDE DROPDOWN
+      const dropdown = cloned.querySelector("select");
+      if (dropdown) dropdown.style.display = "none";
+
+      // ✅ FIX TITLE VISIBILITY
+      const title = cloned.querySelector("h3");
+      if (title) {
+        title.style.color = "#2563eb";
+        title.style.background = "none";
+        title.style.webkitTextFillColor = "#2563eb";
+      }
+    }
+  });
+
+  canvas.toBlob(blob => {
+    saveAs(blob, `voltage_chart_${Date.now()}.png`);
   });
 };
-
 const exportPNGCurrent = async () => {
   const el = document.getElementById("chartCaptureCurrent");
   if (!el) return alert("Current chart not ready!");
 
-  await new Promise(res => setTimeout(res, 200));
-
-  html2canvas(el, {
+  const canvas = await html2canvas(el, {
     scale: 2,
     backgroundColor: "#ffffff",
-    useCORS: true
-  }).then(canvas => {
-    canvas.toBlob(blob => saveAs(blob, `current_chart_${Date.now()}.png`));
+    useCORS: true,
+
+    onclone: (doc) => {
+      const cloned = doc.getElementById("chartCaptureCurrent");
+
+      // ✅ HIDE DROPDOWN (removes "All Phases")
+      const dropdown = cloned.querySelector("select");
+      if (dropdown) dropdown.style.display = "none";
+
+      // ✅ KEEP TITLE VISIBLE (fix gradient issue)
+      const title = cloned.querySelector("h3");
+      if (title) {
+        title.style.color = "#9333ea";
+        title.style.background = "none";
+        title.style.webkitTextFillColor = "#9333ea";
+      }
+    }
+  });
+
+  canvas.toBlob(blob => {
+    saveAs(blob, `current_chart_${Date.now()}.png`);
   });
 };
 
@@ -259,6 +295,7 @@ export default function Dashboard() {
 
       const text = await res.text();
       const parsed = Papa.parse(text, { header: true, dynamicTyping: true });
+      console.log(parsed.data); 
       if (!parsed.data.length) return;
 
       const row = parsed.data[parsed.data.length - 1];
@@ -271,19 +308,21 @@ export default function Dashboard() {
 
       prevRawRef.current = rawIdentifier;
 
-      const newData = {
-        Va: row["V_R"] || 0,
-        Vb: row["V_Y"] || 0,
-        Vc: row["V_B"] || 0,
-        Ia: row["I_R"] || 0,
-        Ib: row["I_Y"] || 0,
-        Ic: row["I_B"] || 0,
-        Pa: row["P_R"] || 0,
-        Pb: row["P_Y"] || 0,
-        Pc: row["P_B"] || 0,
-        
-        Timestamp: formatTS(row["Timestamp"])
-      };
+     const newData = {
+  Va: Number(row["V_R"]) || 0,
+  Vb: Number(row["V_Y"]) || 0,
+  Vc: Number(row["V_B"]) || 0,
+
+  Ia: Number(row["I_R"]) || 0,
+  Ib: Number(row["I_Y"]) || 0,
+  Ic: Number(row["I_B"]) || 0,
+
+  Pa: Number(row["P_R"]) || 0,
+  Pb: Number(row["P_Y"]) || 0,
+  Pc: Number(row["P_B"]) || 0,
+
+  Timestamp: new Date().toLocaleTimeString()
+};
 
       const prev = prevDataRef.current;
       const changed =
@@ -441,59 +480,72 @@ export default function Dashboard() {
           
 
           {/* Charts */}
-          <div id="chartCapture" className="rounded-2xl p-6 bg-white/40 dark:bg-white/10 backdrop-blur-xl border border-white/20 shadow-xl">
-            <div className="flex items-center justify-between mb-4">
-              <h3 className="text-3xl font-black text-transparent bg-clip-text bg-gradient-to-r from-blue-500 to-purple-500">Voltage Trend</h3>
+          <div
+  id="chartCapture"
+  className="rounded-2xl p-6 bg-white/40 dark:bg-white/10 backdrop-blur-xl border border-white/20 shadow-xl"
+>
+  <div className="flex items-center justify-between mb-4">
+    
+    {/* ✅ ONLY ONE TITLE */}
+    <h3 className="chart-title text-3xl font-black bg-gradient-to-r from-blue-500 to-purple-500 bg-clip-text text-transparent">
+  Voltage Trend
+</h3>
 
-              {/* Voltage filter dropdown (glass style) */}
-              <select
-                value={voltageFilter}
-                onChange={(e) => setVoltageFilter(e.target.value)}
-                className="
-                  px-3 py-2 rounded-lg
-                  bg-white/20 dark:bg-white/10
-                  backdrop-blur-md
-                  text-gray-900 dark:text-gray-100
-                  border border-white/30 dark:border-white/20
-                  shadow-sm
-                "
-              >
-                <option value="all">All Phases</option>
-                <option value="Va">Phase R (Va)</option>
-                <option value="Vb">Phase Y (Vb)</option>
-                <option value="Vc">Phase B (Vc)</option>
-              </select>
-            </div>
+    {/* Dropdown */}
+    <select
+      value={voltageFilter}
+      onChange={(e) => setVoltageFilter(e.target.value)}
+      className="
+        px-3 py-2 rounded-lg
+        bg-white/20 dark:bg-white/10
+        backdrop-blur-md
+        text-gray-900 dark:text-gray-100
+        border border-white/30 dark:border-white/20
+        shadow-sm
+      "
+    >
+      <option value="all">All Phases</option>
+      <option value="Va">Phase R (Va)</option>
+      <option value="Vb">Phase Y (Vb)</option>
+      <option value="Vc">Phase B (Vc)</option>
+    </select>
+  </div>
 
-            <Charts type="voltage" data={voltageHistory} filter={voltageFilter} />
-          </div>
+  <Charts type="voltage" data={voltageHistory} filter={voltageFilter} />
+</div>
+<div
+  id="chartCaptureCurrent"
+  className="rounded-2xl p-6 bg-white/40 dark:bg-white/10 backdrop-blur-xl border border-white/20 shadow-xl"
+>
+  <div className="flex items-center justify-between mb-4">
+    
+    {/* ✅ ONLY ONE TITLE */}
+    <h3 className="chart-title text-3xl font-black bg-gradient-to-r from-purple-500 to-pink-500 bg-clip-text text-transparent">
+  Current Trend
+</h3>
+    {/* Dropdown */}
+    <select
+      value={currentFilter}
+      onChange={(e) => setCurrentFilter(e.target.value)}
+      className="
+        px-3 py-2 rounded-lg
+        bg-white/20 dark:bg-white/10
+        backdrop-blur-md
+        text-gray-900 dark:text-gray-100
+        border border-white/30 dark:border-white/20
+        shadow-sm
+      "
+    >
+      <option value="all">All Phases</option>
+      <option value="Ia">Phase R (Ia)</option>
+      <option value="Ib">Phase Y (Ib)</option>
+      <option value="Ic">Phase B (Ic)</option>
+    </select>
+  </div>
 
-          <div id="chartCaptureCurrent" className="rounded-2xl p-6 bg-white/40 dark:bg-white/10 backdrop-blur-xl border border-white/20 shadow-xl">
-            <div className="flex items-center justify-between mb-4">
-              <h3 className="text-3xl font-black text-transparent bg-clip-text bg-gradient-to-r from-purple-500 to-pink-500">Current Trend</h3>
+  <Charts type="current" data={currentHistory} filter={currentFilter} />
+</div>
 
-              {/* Current filter dropdown */}
-              <select
-                value={currentFilter}
-                onChange={(e) => setCurrentFilter(e.target.value)}
-                className="
-                  px-3 py-2 rounded-lg
-                  bg-white/20 dark:bg-white/10
-                  backdrop-blur-md
-                  text-gray-900 dark:text-gray-100
-                  border border-white/30 dark:border-white/20
-                  shadow-sm
-                "
-              >
-                <option value="all">All Phases</option>
-                <option value="Ia">Phase R (Ia)</option>
-                <option value="Ib">Phase Y (Ib)</option>
-                <option value="Ic">Phase B (Ic)</option>
-              </select>
-            </div>
-
-            <Charts type="current" data={currentHistory} filter={currentFilter} />
-          </div>
 
         </section>
 
