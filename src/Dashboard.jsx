@@ -1,12 +1,17 @@
-// Dashboard.jsx  — Full column mapping from Google Sheet
+// Dashboard.jsx
 // Columns: Timestamp, V_R, V_Y, V_B, I_R, I_Y, I_B, P_R, P_Y, P_B,
+//          Q_R, Q_Y, Q_B, PF_R, PF_Y, PF_B,
 //          Street_V, Street_I, Street_P, Street_PF, Street_F
 //
-// MODIFICATIONS (UI unchanged):
-//  1. Y-axis strict clamping per graph type
-//  2. X-axis shows ticks ONLY at 30-min boundaries; all data points still plotted
-//  3. Time-range PNG export (pick start/end time → exports only that slice)
-//  4. Continuous live polling from Google Sheets unchanged
+// MODIFICATIONS applied:
+//  1. Y-axis updated ranges: V=210-260, I=0-10, P=0-3000, Q=0-2500, PF3=0-1
+//  2. Three Phase Reactive Power cards + chart (Q_R, Q_Y, Q_B) — preserved
+//  3. Three Phase Power Factor cards + chart (PF_R, PF_Y, PF_B) — preserved
+//  4. NEW: DER Reactive Power card added to DER 5-card section
+//  5. FIX: DER V&I split into two charts (Voltage 210-260V | Current 0-10A)
+//  6. FIX: DER last two graphs → Power+Freq (one chart) | ReactPower+PF (one chart)
+//  7. FIX: Graph continuation — null gaps handled, connectNulls corrected
+//  8. FIX: Y-axis ranges on all DER charts corrected for clear visibility
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend,
@@ -20,60 +25,47 @@ import EventLog from "./EventLog";
 const CSV_URL =
   "https://docs.google.com/spreadsheets/d/1C2BWZbJ1HJzzqkIuHrvH8OnrT9PbFKVCdaD-40jj9bw/gviz/tq?tqx=out:csv&gid=0";
 const POLL_INTERVAL = 5000;
-// NO cap on history — all data points are stored forever for the session.
-// Storage: refs hold the full arrays (no re-render cost per push).
-// Render:  LTTB downsampling reduces to MAX_RENDER_PTS for smooth charts.
-const MAX_RENDER_PTS = 1200; // max points rendered per chart at once (LTTB keeps shape)
+const MAX_RENDER_PTS = 1200;
 const MAX_EVENTS = 15;
 
-/* ========== Y-AXIS LIMITS per graph (strict, dashboard-enforced) ========== */
-// Voltages  → 0–300 V
-// Currents  → 0–20 A
-// Powers    → 0–5000 W
-// Street V & I → 48–54 (shared axis; I values will compress but axis is correct)
-// Street P, PF, Freq → 0–1
+/* ========== Y-AXIS LIMITS ========== */
 const Y_LIMITS = {
-  voltage: { min: 0, max: 300 },
-  current: { min: 0, max: 20 },
-  power: { min: 0, max: 5000 },
-  streetVI: { min: 48, max: 54 },
-  streetPPF: { min: 0, max: 1 },
+  voltage: { min: 210, max: 260 },  // 3-phase voltage
+  current: { min: 0, max: 10 },  // 3-phase current
+  power: { min: 0, max: 3000 },  // 3-phase active power
+  reactive: { min: 0, max: 2500 },  // 3-phase reactive power
+  pf3phase: { min: 0, max: 1 },  // 3-phase power factor
+  // DER (Street) — separate axes for each parameter
+  derV: { min: 210, max: 260 },  // DER voltage (Street_V) — clear range
+  derI: { min: 0, max: 10 },  // DER current (Street_I) — clear range
+  derP: { min: 0, max: 3000 },  // DER power (Street_P)
+  derPF: { min: 0, max: 1 },  // DER power factor (Street_PF)
+  derFreq: { min: 49, max: 51 },  // DER frequency (Street_F) — tight for visibility
+  derPFreq: { min: 0, max: 3000 },  // Power+Freq combined (Power dominates scale)
+  derQPF: { min: 0, max: 2500 },  // ReactPwr+PF combined (Q dominates scale)
 };
 
 /* =====================================================================
-   LTTB — Largest-Triangle-Three-Buckets downsampling
-   Keeps at most `threshold` points while preserving the visual shape
-   of the series. The full raw array is NEVER modified — this only
-   produces a smaller array for rendering.
-
-   Each element of `data` must have: { t: number (ms), ...values }
-   We downsample on `t` as the X axis.
+   LTTB downsampling — unchanged
 ===================================================================== */
 function lttbDownsample(data, threshold) {
   const len = data.length;
   if (len <= threshold || threshold <= 2) return data;
-
   const sampled = [];
-  let a = 0; // first point always kept
+  let a = 0;
   sampled.push(data[a]);
-
   const bucketSize = (len - 2) / (threshold - 2);
-
   for (let i = 0; i < threshold - 2; i++) {
-    // Calculate point average for next bucket (look-ahead)
     const avgRangeStart = Math.floor((i + 1) * bucketSize) + 1;
     const avgRangeEnd = Math.min(Math.floor((i + 2) * bucketSize) + 1, len);
     let avgX = 0;
     const avgRangeLen = avgRangeEnd - avgRangeStart;
     for (let j = avgRangeStart; j < avgRangeEnd; j++) avgX += data[j].t;
     avgX /= avgRangeLen;
-
-    // Current bucket range
     const rangeStart = Math.floor(i * bucketSize) + 1;
     const rangeEnd = Math.min(Math.floor((i + 1) * bucketSize) + 1, len);
     const pointAX = data[a].t;
-    const pointAY = 0; // use 0 — we only need relative triangle area on the t axis
-
+    const pointAY = 0;
     let maxArea = -1, nextA = rangeStart;
     for (let j = rangeStart; j < rangeEnd; j++) {
       const area = Math.abs(
@@ -82,25 +74,12 @@ function lttbDownsample(data, threshold) {
       ) * 0.5;
       if (area > maxArea) { maxArea = area; nextA = j; }
     }
-
     sampled.push(data[nextA]);
     a = nextA;
   }
-  sampled.push(data[len - 1]); // last point always kept
+  sampled.push(data[len - 1]);
   return sampled;
 }
-
-/* =====================================================================
-   UNLIMITED HISTORY — stored in plain mutable refs, NOT in React state.
-   This means pushing a new point costs O(1) and never triggers a full
-   component re-render just to store data.
-
-   React state (voltageHist etc.) holds only the DOWNSAMPLED snapshot
-   that the chart actually renders; it is updated once per poll tick.
-===================================================================== */
-// Each ref holds: { t: number, ...fieldValues }[]  — grows unbounded
-// (browser RAM is the only practical limit; at 5s polling even 40 hrs
-//  = 28 800 points × ~200 bytes ≈ 5.5 MB total across all 4 arrays)
 
 /* ========== HELPERS ========== */
 const smallNumber = (v, dec = 2) => {
@@ -108,60 +87,71 @@ const smallNumber = (v, dec = 2) => {
   return Number(v).toFixed(dec);
 };
 
-/* ─────────────────────────────────────────────────────────────────────────────
-   30-MINUTE X-AXIS TICK LOGIC
-   ─────────────────────────────────────────────────────────────────────────────
-   • All data points are ALWAYS in chartData (dense, continuous).
-   • XAxis only renders a label when the data point falls on a 30-min boundary.
-   • Between boundaries the axis is blank → gives the "updates continuously,
-     but X label appears only every 30 min" behaviour the user requested.
-   ─────────────────────────────────────────────────────────────────────────────*/
+/* =====================================================================
+   30-MINUTE X-AXIS TICK LOGIC — with dynamic tick before 30 min
+===================================================================== */
 const THIRTY_MIN_MS = 30 * 60 * 1000;
 
-/**
- * Given a timestamp (ms), return the label if it is the first data point
- * that belongs to a new 30-min slot, otherwise return "".
- * We pass the full array so the formatter can compare slots.
- */
-function build30MinTicks(dataWithTs) {
-  // Map: time-string → whether it gets a tick label
+function buildDynamicTicks(data) {
+  if (!data.length) return new Set();
+  const start = data[0].t;
+  const end = data[data.length - 1].t;
+  const elapsed = end - start;
   const tickSet = new Set();
   let lastSlot = null;
-  dataWithTs.forEach(({ t }) => {
-    const slot = Math.floor(t / THIRTY_MIN_MS); // integer slot id
-    if (slot !== lastSlot) {
-      tickSet.add(t);   // first point of this new slot gets the tick
-      lastSlot = slot;
+  data.forEach(({ t }) => {
+    if (elapsed < THIRTY_MIN_MS) {
+      // First 30 min: show a tick every ~5 minutes for readability
+      const fiveMinSlot = Math.floor(t / (5 * 60 * 1000));
+      if (fiveMinSlot !== lastSlot) { tickSet.add(t); lastSlot = fiveMinSlot; }
+    } else {
+      const slot = Math.floor(t / THIRTY_MIN_MS);
+      if (slot !== lastSlot) { tickSet.add(t); lastSlot = slot; }
     }
   });
-  return tickSet; // Set of raw timestamps (ms) that should show a label
+  return tickSet;
 }
 
-/**
- * Format a raw-timestamp number into "HH:MM AM/PM" for the X-axis tick.
- */
 function formatTickTime(t) {
   return new Date(t).toLocaleTimeString("en-IN", {
     hour: "2-digit", minute: "2-digit", hour12: true
   });
 }
 
+function filterDataByTime(data, startHHMM, endHHMM) {
+  const [sh, sm] = startHHMM.split(":").map(Number);
+  const [eh, em] = endHHMM.split(":").map(Number);
+  const start = sh * 60 + sm;
+  const end = eh * 60 + em;
+  return data.filter(d => {
+    const dt = new Date(d.t);
+    const mins = dt.getHours() * 60 + dt.getMinutes();
+    return mins >= start && mins <= end;
+  });
+}
+
 /* =====================================================================
-   SMALL KPI CARD
+   SMALL KPI CARD — unchanged visual
 ===================================================================== */
 const SmallCard = React.memo(function SmallCard({ label, value, unit, accent = "blue" }) {
   const emojiMap = {
     "Voltage R": "⚡", "Voltage Y": "⚡", "Voltage B": "⚡",
     "Current R": "🔌", "Current Y": "🔌", "Current B": "🔌",
     "Power R": "💡", "Power Y": "💡", "Power B": "💡",
+    "React. Power R": "🔄", "React. Power Y": "🔄", "React. Power B": "🔄",
+    "Power Factor R": "🎯", "Power Factor Y": "🎯", "Power Factor B": "🎯",
     "Street Voltage": "🏙️", "Street Current": "🔋",
     "Street Power": "⚙️", "Street PF": "🎛️", "Street Freq": "📡",
+    // NEW DER card
+    "DER React. Power": "🔁",
   };
   const gradients = {
     blue: "from-blue-600 via-indigo-600 to-purple-600",
     green: "from-emerald-500 via-teal-500 to-cyan-500",
     orange: "from-orange-500 via-amber-500 to-yellow-500",
     pink: "from-pink-500 via-rose-500 to-red-500",
+    violet: "from-violet-500 via-purple-500 to-fuchsia-500",
+    cyan: "from-cyan-500 via-sky-500 to-blue-500",
   };
   const emoji = emojiMap[label] || "📊";
   const grad = gradients[accent] || gradients.blue;
@@ -182,7 +172,7 @@ const SmallCard = React.memo(function SmallCard({ label, value, unit, accent = "
 });
 
 /* =====================================================================
-   CUSTOM TOOLTIP
+   CUSTOM TOOLTIP — unchanged
 ===================================================================== */
 const CustomTooltip = ({ active, payload, label }) => {
   if (!active || !payload?.length) return null;
@@ -207,7 +197,7 @@ const CustomTooltip = ({ active, payload, label }) => {
 };
 
 /* =====================================================================
-   THEME-AWARE TOP-RIGHT LEGEND
+   TOP-RIGHT LEGEND — unchanged
 ===================================================================== */
 const TopRightLegend = ({ keys, isDark }) => {
   const bg = isDark ? "rgba(15,23,42,0.75)" : "rgba(255,255,255,0.88)";
@@ -224,10 +214,7 @@ const TopRightLegend = ({ keys, isDark }) => {
     }}>
       {keys.map(k => (
         <div key={k.dataKey} style={{ display: "flex", alignItems: "center", gap: 5 }}>
-          <span style={{
-            display: "inline-block", width: 16, height: 2.5,
-            background: k.color, borderRadius: 2, flexShrink: 0,
-          }} />
+          <span style={{ display: "inline-block", width: 16, height: 2.5, background: k.color, borderRadius: 2, flexShrink: 0 }} />
           <span style={{ color: text, fontWeight: 600, whiteSpace: "nowrap" }}>{k.name}</span>
         </div>
       ))}
@@ -237,27 +224,19 @@ const TopRightLegend = ({ keys, isDark }) => {
 
 /* =====================================================================
    GENERIC CHART COMPONENT
-   — All data points plotted continuously
-   — X-axis labels only at 30-min boundaries
-   — Y-axis zoom: scroll wheel zooms IN/OUT, always clamped to [yMin,yMax]
-   — Shift+drag to pan the zoomed Y window (also clamped)
-   — Reset Zoom restores exactly to [yMin, yMax]
-   — Brush slider at bottom for X-axis time navigation
+   FIX: connectNulls=false + proper null handling for continuous lines
+   All zoom/pan/brush features preserved unchanged
 ===================================================================== */
 const Charts = React.memo(function Charts({
   keys, data, yLabel, yUnit, refVal, filter = "all", yMin = 0, yMax = 300, isDark
 }) {
-  /* ── zoomed Y domain — null means "show full range [yMin,yMax]" ── */
   const [zoomDomain, setZoomDomain] = useState(null);
   const zoomRef = useRef(null);
 
-  /* Clamp a [lo,hi] pair so it never escapes [yMin,yMax] */
   const clampDomain = useCallback((lo, hi) => {
     const range = hi - lo;
     const fullRange = yMax - yMin;
-    // If zoomed range is wider than full range, just reset
     if (range >= fullRange) return null;
-    // Shift window so it stays inside [yMin, yMax]
     let clo = lo, chi = hi;
     if (clo < yMin) { clo = yMin; chi = yMin + range; }
     if (chi > yMax) { chi = yMax; clo = yMax - range; }
@@ -266,58 +245,44 @@ const Charts = React.memo(function Charts({
     return [clo, chi];
   }, [yMin, yMax]);
 
-  /* Keep ref in sync so wheel/drag handlers read latest without stale closure */
   useEffect(() => { zoomRef.current = zoomDomain; }, [zoomDomain]);
-
-  /* Reset zoom whenever the axis limits change (different graph) */
   useEffect(() => { setZoomDomain(null); zoomRef.current = null; }, [yMin, yMax]);
 
-  /* ── Scroll wheel: zoom in/out centered on the middle of current window ── */
   const handleWheel = useCallback((e) => {
     e.preventDefault();
     const current = zoomRef.current ?? [yMin, yMax];
     const [lo, hi] = current;
     const range = hi - lo;
     const center = (lo + hi) / 2;
-    /* zoom in = shrink range 15%, zoom out = grow range 18% */
     const factor = e.deltaY < 0 ? 0.85 : 1.18;
     const newRange = range * factor;
-    /* Don't zoom in too much (min 2% of full range), don't zoom out past full */
     const minRange = (yMax - yMin) * 0.02;
-    if (newRange < minRange) return; // too zoomed in — stop
-    const newLo = center - newRange / 2;
-    const newHi = center + newRange / 2;
-    const clamped = clampDomain(newLo, newHi);
-    setZoomDomain(clamped); // null if wider than full → reset
+    if (newRange < minRange) return;
+    const clamped = clampDomain(center - newRange / 2, center + newRange / 2);
+    setZoomDomain(clamped);
   }, [yMin, yMax, clampDomain]);
 
-  /* ── Shift+drag to pan the zoomed window ── */
   const dragRef = useRef({ active: false, startY: 0, startDomain: null });
-
   const handleMouseDown = useCallback((e) => {
     if (!e.shiftKey) return;
     e.preventDefault();
-    dragRef.current = {
-      active: true,
-      startY: e.clientY,
-      startDomain: zoomRef.current ?? [yMin, yMax],
-    };
+    dragRef.current = { active: true, startY: e.clientY, startDomain: zoomRef.current ?? [yMin, yMax] };
   }, [yMin, yMax]);
-
   const handleMouseMove = useCallback((e) => {
     const drag = dragRef.current;
     if (!drag.active) return;
     const [lo, hi] = drag.startDomain;
     const range = hi - lo;
-    /* map pixel movement to value shift: 250px = 1 full range */
     const valueDelta = ((drag.startY - e.clientY) / 250) * range;
     const clamped = clampDomain(lo + valueDelta, hi + valueDelta);
     if (clamped) setZoomDomain(clamped);
   }, [clampDomain]);
-
   const handleMouseUp = useCallback(() => { dragRef.current.active = false; }, []);
 
-  /* ── Chart data ── */
+  /* ── Build chartData
+     FIX: Values outside Y range become null (not dropped) so Recharts
+     draws a gap rather than a wild spike, and connectNulls=false keeps
+     the line continuous inside-range while breaking at true null gaps. ── */
   const { chartData, tickTimestamps } = useMemo(() => {
     const cd = data.map(d => {
       const point = {
@@ -326,17 +291,21 @@ const Charts = React.memo(function Charts({
           hour: "2-digit", minute: "2-digit", second: "2-digit"
         }),
       };
-      keys.forEach(k => { point[k.dataKey] = d[k.dataKey] ?? null; });
+      keys.forEach(k => {
+        const raw = d[k.dataKey];
+        // Keep value if in-range; otherwise null (renders as gap, not spike)
+        point[k.dataKey] = (raw !== null && raw !== undefined && !isNaN(raw) && raw >= yMin && raw <= yMax)
+          ? raw
+          : null;
+      });
       return point;
     });
-    const tts = build30MinTicks(data);
+    const tts = buildDynamicTicks(data);
     return { chartData: cd, tickTimestamps: tts };
-  }, [data, keys]);
+  }, [data, keys, yMin, yMax]);
 
-  /* ── Active Y domain: zoomed window OR full range ── */
   const yDomain = zoomDomain ?? [yMin, yMax];
   const isZoomed = zoomDomain !== null;
-
   const opacityFor = (key) => (!filter || filter === "all") ? 1 : filter === key ? 1 : 0.15;
   const yTickFmt = (v) => typeof v === "number" ? `${v.toFixed(2)}${yUnit}` : v;
 
@@ -354,8 +323,6 @@ const Charts = React.memo(function Charts({
 
   return (
     <div style={{ position: "relative" }}>
-
-      {/* ── Zoom hint + live range badge + Reset button ── */}
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4, flexWrap: "wrap" }}>
         <span style={{ fontSize: 10, color: hintColor }}>
           🖱 Scroll to zoom Y · Shift+drag to pan
@@ -368,136 +335,87 @@ const Charts = React.memo(function Charts({
             }}>
               Y: {zoomDomain[0].toFixed(2)}{yUnit} – {zoomDomain[1].toFixed(2)}{yUnit}
             </span>
-            <button
-              onClick={() => setZoomDomain(null)}
-              style={{
-                fontSize: 10, cursor: "pointer",
-                background: "rgba(239,68,68,0.15)", color: "#f87171",
-                border: "1px solid rgba(239,68,68,0.3)",
-                borderRadius: 6, padding: "2px 8px", fontWeight: 600
-              }}
-            >
-              Reset Zoom
-            </button>
+            <button onClick={() => setZoomDomain(null)} style={{
+              fontSize: 10, cursor: "pointer",
+              background: "rgba(239,68,68,0.15)", color: "#f87171",
+              border: "1px solid rgba(239,68,68,0.3)",
+              borderRadius: 6, padding: "2px 8px", fontWeight: 600
+            }}>Reset Zoom</button>
           </>
         )}
       </div>
 
       <div
-        onWheel={handleWheel}
-        onMouseDown={handleMouseDown}
-        onMouseMove={handleMouseMove}
-        onMouseUp={handleMouseUp}
-        onMouseLeave={handleMouseUp}
+        onWheel={handleWheel} onMouseDown={handleMouseDown}
+        onMouseMove={handleMouseMove} onMouseUp={handleMouseUp} onMouseLeave={handleMouseUp}
         style={{ cursor: isZoomed ? "zoom-in" : "crosshair", userSelect: "none" }}
       >
         <ResponsiveContainer width="100%" height={240}>
           <LineChart data={chartData} margin={{ top: 6, right: 18, bottom: 4, left: 10 }}>
             <CartesianGrid strokeDasharray="3 3" stroke={gridColor} opacity={0.22} />
-
-            {/* X-axis: tick label only at 30-min boundaries */}
             <XAxis
-              dataKey="time"
-              stroke={axisColor}
+              dataKey="time" stroke={axisColor}
               tick={{ fontSize: 10, fill: tickColor }}
-              tickFormatter={xTickFormatter}
-              minTickGap={1}
-              interval={0}
-              tickLine={false}
+              tickFormatter={xTickFormatter} minTickGap={1} interval={0} tickLine={false}
             />
-
-            {/* Y-axis: zoomed domain (clamped within [yMin,yMax]) or full range */}
             <YAxis
-              stroke={axisColor}
-              domain={yDomain}
-              allowDataOverflow={false}
-              tickFormatter={yTickFmt}
-              tick={{ fontSize: 10, fill: tickColor }}
-              tickCount={6}
-              tickLine={false}
-              width={64}
+              stroke={axisColor} domain={yDomain} allowDataOverflow={false}
+              tickFormatter={yTickFmt} tick={{ fontSize: 10, fill: tickColor }}
+              tickCount={6} tickLine={false} width={68}
               label={{ value: yLabel, angle: -90, position: "insideLeft", fill: axisColor, fontSize: 10, dy: 50 }}
             />
             <Tooltip content={<CustomTooltip />} />
             <Legend wrapperStyle={{ display: "none" }} />
             {refVal !== null && refVal !== undefined && (
               <ReferenceLine
-                y={refVal}
-                stroke="#22c55e"
-                strokeDasharray="6 3"
-                strokeWidth={1.5}
+                y={refVal} stroke="#22c55e" strokeDasharray="6 3" strokeWidth={1.5}
                 label={{ value: `${refVal}${yUnit} nominal`, position: "insideTopRight", fontSize: 9, fill: "#22c55e" }}
               />
             )}
             {keys.map(k => (
               <Line
-                key={k.dataKey}
-                type="monotone"
-                dataKey={k.dataKey}
-                stroke={k.color}
-                strokeWidth={2.5}
-                dot={false}
-                name={k.name}
+                key={k.dataKey} type="monotone" dataKey={k.dataKey}
+                stroke={k.color} strokeWidth={2.5} dot={false} name={k.name}
                 strokeOpacity={opacityFor(k.dataKey)}
-                connectNulls={false}
+                connectNulls={false}   /* FIX: false = show gaps, not wild lines */
                 isAnimationActive={false}
               />
             ))}
-            <Brush
-              dataKey="time"
-              height={20}
-              stroke="#6366f1"
-              fill="rgba(99,102,241,0.08)"
-              travellerWidth={8}
-            />
+            <Brush dataKey="time" height={20} stroke="#6366f1" fill="rgba(99,102,241,0.08)" travellerWidth={8} />
           </LineChart>
         </ResponsiveContainer>
       </div>
-
-      {/* "Time →" label */}
       <div style={{
         textAlign: "right", paddingRight: 18, marginTop: 2,
         fontSize: 10, color: axisColor, userSelect: "none", pointerEvents: "none",
-      }}>
-        Time →
-      </div>
+      }}>Time →</div>
     </div>
   );
 });
 
 /* =====================================================================
-   CHART PANEL
+   CHART PANEL — unchanged UI
 ===================================================================== */
 function ChartPanel({ id, title, titleClass, keys, filterOptions, data, yLabel, yUnit, refVal, yMin = 0, yMax, isDark }) {
   const [filter, setFilter] = useState("all");
   const selectCls = isDark
     ? "px-2 py-1 text-xs rounded-lg bg-slate-800 text-gray-100 border border-slate-600 shadow-sm"
     : "px-2 py-1 text-xs rounded-lg bg-white text-gray-800 border border-slate-300 shadow-sm";
-
   return (
     <div id={id} className={`rounded-2xl p-4 border border-white/20 shadow-xl backdrop-blur-xl ${isDark ? "bg-white/10" : "bg-white/70"}`}>
-
-      {/* ── Header row: title | [filter dropdown] | legend ── */}
       <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 8, gap: 8 }}>
-
-        {/* Title — left */}
-        <h3 className={`text-lg font-bold bg-clip-text text-transparent ${titleClass}`}
-          style={{ flexShrink: 0 }}>
+        <h3 className={`text-lg font-bold bg-clip-text text-transparent ${titleClass}`} style={{ flexShrink: 0 }}>
           {title}
         </h3>
-
-        {/* Right cluster: filter dropdown (optional) + legend — always flush to top-right */}
         <div style={{ display: "flex", alignItems: "flex-start", gap: 8, flexShrink: 0 }}>
           {filterOptions && (
             <select value={filter} onChange={(e) => setFilter(e.target.value)} className={selectCls}>
               {filterOptions.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
             </select>
           )}
-          {/* Legend sits here — completely outside the chart canvas, never overlapping plots */}
           <TopRightLegend keys={keys} isDark={isDark} />
         </div>
       </div>
-
       <Charts
         keys={keys} data={data} yLabel={yLabel} yUnit={yUnit}
         refVal={refVal} filter={filter} yMin={yMin} yMax={yMax} isDark={isDark}
@@ -507,12 +425,9 @@ function ChartPanel({ id, title, titleClass, keys, filterOptions, data, yLabel, 
 }
 
 /* =====================================================================
-   TIME-RANGE EXPORT MODAL
-   — Lets user pick startTime and endTime (HH:MM), then exports only
-     data points in that window from the full history array.
+   TIME-RANGE EXPORT MODAL — unchanged, updated chart list
 ===================================================================== */
 function TimeRangeExportModal({ isOpen, onClose, onExport, isDark, rawRef }) {
-  // ── Derive actual recorded session range from whichever rawRef has data ──
   const sessionRange = useMemo(() => {
     const arr = rawRef?.current ?? [];
     if (!arr.length) return null;
@@ -520,32 +435,18 @@ function TimeRangeExportModal({ isOpen, onClose, onExport, isDark, rawRef }) {
     const last = arr[arr.length - 1].t;
     const fmt = (ms) => new Date(ms).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", hour12: false });
     const fmtFull = (ms) => new Date(ms).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", hour12: true });
-    return {
-      startHHMM: fmt(first),   // "HH:MM" for time input default
-      endHHMM: fmt(last),
-      startLabel: fmtFull(first),
-      endLabel: fmtFull(last),
-      totalPts: arr.length,
-    };
+    return { startHHMM: fmt(first), endHHMM: fmt(last), startLabel: fmtFull(first), endLabel: fmtFull(last), totalPts: arr.length };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isOpen, rawRef]);  // re-derive each time modal opens
+  }, [isOpen, rawRef]);
 
   const [startTime, setStartTime] = useState("");
   const [endTime, setEndTime] = useState("");
   const [chartType, setChartType] = useState("voltage");
   const [exportError, setExportError] = useState("");
 
-  // When modal opens, auto-fill pickers with actual session bounds
   useEffect(() => {
-    if (isOpen && sessionRange) {
-      setStartTime(sessionRange.startHHMM);
-      setEndTime(sessionRange.endHHMM);
-      setExportError("");
-    } else if (isOpen && !sessionRange) {
-      setStartTime("");
-      setEndTime("");
-      setExportError("No data recorded yet. Keep the dashboard running and try again.");
-    }
+    if (isOpen && sessionRange) { setStartTime(sessionRange.startHHMM); setEndTime(sessionRange.endHHMM); setExportError(""); }
+    else if (isOpen && !sessionRange) { setStartTime(""); setEndTime(""); setExportError("No data recorded yet."); }
   }, [isOpen, sessionRange]);
 
   if (!isOpen) return null;
@@ -563,121 +464,65 @@ function TimeRangeExportModal({ isOpen, onClose, onExport, isDark, rawRef }) {
     { value: "voltage", label: "Three Phase Voltages" },
     { value: "current", label: "Three Phase Currents" },
     { value: "power", label: "Three Phase Powers" },
-    { value: "streetVI", label: "DER Voltage & Current" },
-    { value: "streetPPF", label: "DER Power · PF · Freq" },
+    { value: "reactive", label: "Three Phase Reactive Powers" },
+    { value: "pf3phase", label: "Three Phase Power Factors" },
+    { value: "derV", label: "DER Voltage" },
+    { value: "derI", label: "DER Current" },
+    { value: "derPFreq", label: "DER Power + Frequency" },
+    { value: "derQPF", label: "DER React. Power + Power Factor" },
   ];
 
   const handleExport = () => {
-    if (!sessionRange) {
-      setExportError("No data recorded yet. Keep the dashboard running and try again.");
-      return;
-    }
-    if (!startTime || !endTime) {
-      setExportError("Please select both a start and end time.");
-      return;
-    }
-    if (startTime >= endTime) {
-      setExportError("End time must be after start time.");
-      return;
-    }
+    if (!sessionRange) { setExportError("No data recorded yet."); return; }
+    if (!startTime || !endTime) { setExportError("Please select both times."); return; }
+    if (startTime >= endTime) { setExportError("End time must be after start time."); return; }
     setExportError("");
     const err = onExport(chartType, startTime, endTime);
-    if (err) {
-      // exportChartPNGByRange returned an error string — show it inline, do NOT close modal
-      setExportError(err);
-    } else {
-      onClose();
-    }
+    if (err) setExportError(err);
+    else onClose();
   };
 
   return (
-    <div style={{
-      position: "fixed", inset: 0, zIndex: 9999,
-      background: overlayBg, display: "flex", alignItems: "center", justifyContent: "center"
-    }}
-      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
-    >
-      <div style={{
-        background: modalBg, border, borderRadius: 16, padding: 28,
-        width: 380, boxShadow: "0 20px 60px rgba(0,0,0,0.5)"
-      }}>
-        <h3 style={{
-          margin: "0 0 4px", fontSize: 16, fontWeight: 700,
-          background: "linear-gradient(to right,#3b82f6,#8b5cf6)",
-          WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent"
-        }}>
+    <div style={{ position: "fixed", inset: 0, zIndex: 9999, background: overlayBg, display: "flex", alignItems: "center", justifyContent: "center" }}
+      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+      <div style={{ background: modalBg, border, borderRadius: 16, padding: 28, width: 380, boxShadow: "0 20px 60px rgba(0,0,0,0.5)" }}>
+        <h3 style={{ margin: "0 0 4px", fontSize: 16, fontWeight: 700, background: "linear-gradient(to right,#3b82f6,#8b5cf6)", WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent" }}>
           📥 Export Time Range
         </h3>
-
-        {/* Session availability info */}
         {sessionRange ? (
-          <div style={{
-            marginBottom: 16, padding: "8px 10px", borderRadius: 8,
-            background: isDark ? "rgba(16,185,129,0.10)" : "rgba(16,185,129,0.08)",
-            border: "1px solid rgba(16,185,129,0.25)", fontSize: 11, color: "#10b981"
-          }}>
-            ✅ Session data available: <strong>{sessionRange.startLabel}</strong> → <strong>{sessionRange.endLabel}</strong>
-            <span style={{ color: hintClr, marginLeft: 6 }}>({sessionRange.totalPts} data points)</span>
+          <div style={{ marginBottom: 16, padding: "8px 10px", borderRadius: 8, background: isDark ? "rgba(16,185,129,0.10)" : "rgba(16,185,129,0.08)", border: "1px solid rgba(16,185,129,0.25)", fontSize: 11, color: "#10b981" }}>
+            ✅ Session: <strong>{sessionRange.startLabel}</strong> → <strong>{sessionRange.endLabel}</strong>
+            <span style={{ color: hintClr, marginLeft: 6 }}>({sessionRange.totalPts} pts)</span>
           </div>
         ) : (
-          <div style={{
-            marginBottom: 16, padding: "8px 10px", borderRadius: 8,
-            background: isDark ? "rgba(239,68,68,0.10)" : "rgba(239,68,68,0.08)",
-            border: "1px solid rgba(239,68,68,0.25)", fontSize: 11, color: "#f87171"
-          }}>
-            ⚠️ No data recorded yet. Keep the dashboard running to accumulate data, then export.
+          <div style={{ marginBottom: 16, padding: "8px 10px", borderRadius: 8, background: isDark ? "rgba(239,68,68,0.10)" : "rgba(239,68,68,0.08)", border: "1px solid rgba(239,68,68,0.25)", fontSize: 11, color: "#f87171" }}>
+            ⚠️ No data recorded yet.
           </div>
         )}
-
         <div style={{ marginBottom: 14 }}>
-          <label style={{ display: "block", fontSize: 11, fontWeight: 600, color: labelClr, marginBottom: 5, textTransform: "uppercase", letterSpacing: "0.05em" }}>
-            Chart
-          </label>
+          <label style={{ display: "block", fontSize: 11, fontWeight: 600, color: labelClr, marginBottom: 5, textTransform: "uppercase", letterSpacing: "0.05em" }}>Chart</label>
           <select value={chartType} onChange={e => setChartType(e.target.value)} style={inputCls}>
             {charts.map(c => <option key={c.value} value={c.value}>{c.label}</option>)}
           </select>
         </div>
-
         <div style={{ marginBottom: 14 }}>
-          <label style={{ display: "block", fontSize: 11, fontWeight: 600, color: labelClr, marginBottom: 5, textTransform: "uppercase", letterSpacing: "0.05em" }}>
-            Start Time (HH:MM — 24hr)
-          </label>
+          <label style={{ display: "block", fontSize: 11, fontWeight: 600, color: labelClr, marginBottom: 5, textTransform: "uppercase", letterSpacing: "0.05em" }}>Start Time (HH:MM — 24hr)</label>
           <input type="time" value={startTime} onChange={e => { setStartTime(e.target.value); setExportError(""); }} style={inputCls} />
           {sessionRange && <p style={{ margin: "3px 0 0", fontSize: 10, color: hintClr }}>Session starts: {sessionRange.startLabel}</p>}
         </div>
-
         <div style={{ marginBottom: exportError ? 10 : 22 }}>
-          <label style={{ display: "block", fontSize: 11, fontWeight: 600, color: labelClr, marginBottom: 5, textTransform: "uppercase", letterSpacing: "0.05em" }}>
-            End Time (HH:MM — 24hr)
-          </label>
+          <label style={{ display: "block", fontSize: 11, fontWeight: 600, color: labelClr, marginBottom: 5, textTransform: "uppercase", letterSpacing: "0.05em" }}>End Time (HH:MM — 24hr)</label>
           <input type="time" value={endTime} onChange={e => { setEndTime(e.target.value); setExportError(""); }} style={inputCls} />
           {sessionRange && <p style={{ margin: "3px 0 0", fontSize: 10, color: hintClr }}>Session ends: {sessionRange.endLabel}</p>}
         </div>
-
-        {/* Inline error — replaces the horrible browser alert */}
         {exportError && (
-          <div style={{
-            marginBottom: 14, padding: "7px 10px", borderRadius: 8,
-            background: "rgba(239,68,68,0.12)", border: "1px solid rgba(239,68,68,0.3)",
-            fontSize: 11, color: "#f87171", fontWeight: 500
-          }}>
+          <div style={{ marginBottom: 14, padding: "7px 10px", borderRadius: 8, background: "rgba(239,68,68,0.12)", border: "1px solid rgba(239,68,68,0.3)", fontSize: 11, color: "#f87171", fontWeight: 500 }}>
             ⚠️ {exportError}
           </div>
         )}
-
         <div style={{ display: "flex", gap: 10 }}>
-          <button onClick={onClose} style={{
-            flex: 1, padding: "9px 0", borderRadius: 10, fontSize: 13, fontWeight: 600,
-            background: "transparent",
-            border: isDark ? "1px solid #334155" : "1px solid #cbd5e1",
-            color: isDark ? "#94a3b8" : "#64748b", cursor: "pointer"
-          }}>Cancel</button>
-          <button onClick={handleExport} style={{
-            flex: 1, padding: "9px 0", borderRadius: 10, fontSize: 13, fontWeight: 600,
-            background: sessionRange ? "linear-gradient(to right,#3b82f6,#8b5cf6)" : "#334155",
-            border: "none", color: "#fff", cursor: sessionRange ? "pointer" : "not-allowed",
-            boxShadow: "0 4px 14px rgba(99,102,241,0.4)"
-          }}>Export PNG</button>
+          <button onClick={onClose} style={{ flex: 1, padding: "9px 0", borderRadius: 10, fontSize: 13, fontWeight: 600, background: "transparent", border: isDark ? "1px solid #334155" : "1px solid #cbd5e1", color: isDark ? "#94a3b8" : "#64748b", cursor: "pointer" }}>Cancel</button>
+          <button onClick={handleExport} style={{ flex: 1, padding: "9px 0", borderRadius: 10, fontSize: 13, fontWeight: 600, background: sessionRange ? "linear-gradient(to right,#3b82f6,#8b5cf6)" : "#334155", border: "none", color: "#fff", cursor: sessionRange ? "pointer" : "not-allowed", boxShadow: "0 4px 14px rgba(99,102,241,0.4)" }}>Export PNG</button>
         </div>
       </div>
     </div>
@@ -685,23 +530,20 @@ function TimeRangeExportModal({ isOpen, onClose, onExport, isDark, rawRef }) {
 }
 
 /* =====================================================================
-   PNG EXPORT — canvas drawn, legend INSIDE top-right
+   PNG EXPORT — unchanged canvas logic
 ===================================================================== */
 const exportChartPNG = (chartData, keys, yDomain, yUnit, yLabel, title, filename, accentColor) => {
   const W = 1000, H = 460;
   const margin = { top: 56, right: 16, bottom: 60, left: 84 };
   const plotW = W - margin.left - margin.right;
   const plotH = H - margin.top - margin.bottom;
-
   const canvas = document.createElement("canvas");
   canvas.width = W * 2; canvas.height = H * 2;
   const ctx = canvas.getContext("2d");
   ctx.scale(2, 2);
+  ctx.fillStyle = "#ffffff"; ctx.fillRect(0, 0, W, H);
 
-  ctx.fillStyle = "#ffffff";
-  ctx.fillRect(0, 0, W, H);
-
-  /* ── Legend ── */
+  // Legend box
   const LEGEND_ROW_H = 18, LEGEND_PAD_X = 10, LEGEND_PAD_Y = 7;
   const SWATCH_W = 20, SWATCH_GAP = 6, LEGEND_FONT = 10, LEGEND_MARGIN = 12;
   ctx.font = `600 ${LEGEND_FONT}px system-ui, sans-serif`;
@@ -709,54 +551,45 @@ const exportChartPNG = (chartData, keys, yDomain, yUnit, yLabel, title, filename
   const boxW = LEGEND_PAD_X * 2 + SWATCH_W + SWATCH_GAP + maxTextW + 2;
   const boxH = LEGEND_PAD_Y * 2 + keys.length * LEGEND_ROW_H - (LEGEND_ROW_H - 14);
   const bx = W - LEGEND_MARGIN - boxW, by = LEGEND_MARGIN;
-
   ctx.shadowColor = "rgba(0,0,0,0.10)"; ctx.shadowBlur = 6;
   ctx.fillStyle = "#ffffff"; ctx.strokeStyle = "#e2e8f0"; ctx.lineWidth = 1;
   const R = 5;
   ctx.beginPath();
-  ctx.moveTo(bx + R, by); ctx.lineTo(bx + boxW - R, by);
-  ctx.quadraticCurveTo(bx + boxW, by, bx + boxW, by + R);
-  ctx.lineTo(bx + boxW, by + boxH - R);
-  ctx.quadraticCurveTo(bx + boxW, by + boxH, bx + boxW - R, by + boxH);
+  ctx.moveTo(bx + R, by); ctx.lineTo(bx + boxW - R, by); ctx.quadraticCurveTo(bx + boxW, by, bx + boxW, by + R);
+  ctx.lineTo(bx + boxW, by + boxH - R); ctx.quadraticCurveTo(bx + boxW, by + boxH, bx + boxW - R, by + boxH);
   ctx.lineTo(bx + R, by + boxH); ctx.quadraticCurveTo(bx, by + boxH, bx, by + boxH - R);
   ctx.lineTo(bx, by + R); ctx.quadraticCurveTo(bx, by, bx + R, by);
   ctx.closePath(); ctx.fill();
   ctx.shadowColor = "transparent"; ctx.shadowBlur = 0; ctx.stroke();
-
   keys.forEach((k, idx) => {
     const rowY = by + LEGEND_PAD_Y + idx * LEGEND_ROW_H;
     const lineY = rowY + 7;
     ctx.strokeStyle = k.color; ctx.lineWidth = 2.5; ctx.lineCap = "round"; ctx.setLineDash([]);
     ctx.beginPath(); ctx.moveTo(bx + LEGEND_PAD_X, lineY); ctx.lineTo(bx + LEGEND_PAD_X + SWATCH_W, lineY); ctx.stroke();
-    ctx.font = `600 ${LEGEND_FONT}px system-ui, sans-serif`;
-    ctx.fillStyle = "#1e293b"; ctx.textAlign = "left";
+    ctx.font = `600 ${LEGEND_FONT}px system-ui, sans-serif`; ctx.fillStyle = "#1e293b"; ctx.textAlign = "left";
     ctx.fillText(k.name, bx + LEGEND_PAD_X + SWATCH_W + SWATCH_GAP, lineY + 3);
   });
   ctx.setLineDash([]); ctx.lineCap = "butt";
 
-  /* ── Title ── */
-  ctx.font = "bold 15px system-ui, sans-serif";
-  ctx.fillStyle = accentColor; ctx.textAlign = "left";
+  // Title
+  ctx.font = "bold 15px system-ui, sans-serif"; ctx.fillStyle = accentColor; ctx.textAlign = "left";
   ctx.fillText(title, margin.left, 32);
 
-  /* ── Y-axis label ── */
-  ctx.save();
-  ctx.translate(16, margin.top + plotH / 2); ctx.rotate(-Math.PI / 2);
+  // Y label
+  ctx.save(); ctx.translate(16, margin.top + plotH / 2); ctx.rotate(-Math.PI / 2);
   ctx.font = "11px system-ui, sans-serif"; ctx.fillStyle = "#64748b"; ctx.textAlign = "center";
   ctx.fillText(yLabel, 0, 0); ctx.restore();
 
-  /* ── X-axis label ── */
+  // X label
   ctx.font = "11px system-ui, sans-serif"; ctx.fillStyle = "#64748b"; ctx.textAlign = "right";
   ctx.fillText("Time →", margin.left + plotW, H - 10);
 
-  /* ── Y scale ── */
+  // Y scale
   const [yMin, yMax2] = Array.isArray(yDomain) ? yDomain : [0, 100];
   const yRange = (yMax2 - yMin) || 1;
   const toY = v => margin.top + plotH - ((v - yMin) / yRange) * plotH;
-
-  const TICK_COUNT = 5;
-  for (let i = 0; i <= TICK_COUNT; i++) {
-    const val = yMin + (yRange * i) / TICK_COUNT;
+  for (let i = 0; i <= 5; i++) {
+    const val = yMin + (yRange * i) / 5;
     const y = toY(val);
     ctx.strokeStyle = "#e2e8f0"; ctx.lineWidth = 1; ctx.setLineDash([4, 3]);
     ctx.beginPath(); ctx.moveTo(margin.left, y); ctx.lineTo(margin.left + plotW, y); ctx.stroke();
@@ -765,25 +598,24 @@ const exportChartPNG = (chartData, keys, yDomain, yUnit, yLabel, title, filename
     ctx.fillText(`${val.toFixed(2)}${yUnit}`, margin.left - 6, y + 4);
   }
 
-  /* ── X-tick labels: 30-min boundaries only ── */
+  // X tick labels (evenly spaced)
   if (chartData.length > 1) {
-    // Build tick set from the exported data
-    const exportTickTs = build30MinTicks(chartData.map(d => ({ t: d._ts })));
+    const step = Math.max(1, Math.floor(chartData.length / 10));
     ctx.font = "10px system-ui, sans-serif"; ctx.fillStyle = "#94a3b8"; ctx.textAlign = "center";
-    chartData.forEach((d, i) => {
-      if (!exportTickTs.has(d._ts)) return;
+    for (let i = 0; i < chartData.length; i += step) {
       const x = margin.left + (i / (chartData.length - 1)) * plotW;
-      ctx.fillText(formatTickTime(d._ts), x, margin.top + plotH + 18);
-    });
+      ctx.fillText(
+        new Date(chartData[i]._ts).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", hour12: true }),
+        x, margin.top + plotH + 18
+      );
+    }
   }
 
-  /* ── Axis lines ── */
+  // Axis lines
   ctx.strokeStyle = "#94a3b8"; ctx.lineWidth = 1.5; ctx.setLineDash([]);
-  ctx.beginPath();
-  ctx.moveTo(margin.left, margin.top); ctx.lineTo(margin.left, margin.top + plotH);
-  ctx.lineTo(margin.left + plotW, margin.top + plotH); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(margin.left, margin.top); ctx.lineTo(margin.left, margin.top + plotH); ctx.lineTo(margin.left + plotW, margin.top + plotH); ctx.stroke();
 
-  /* ── Data lines ── */
+  // Data lines
   if (chartData.length > 1) {
     keys.forEach(k => {
       ctx.strokeStyle = k.color; ctx.lineWidth = 2.2; ctx.setLineDash([]);
@@ -799,57 +631,25 @@ const exportChartPNG = (chartData, keys, yDomain, yUnit, yLabel, title, filename
       ctx.stroke();
     });
   }
-
   ctx.setLineDash([]); ctx.lineCap = "butt";
   canvas.toBlob(blob => saveAs(blob, `${filename}_${Date.now()}.png`));
 };
 
-/* ─────────────────────────────────────────────────────────────────────────────
-   TIME-RANGE AWARE PNG EXPORT
-   • Filters the history array by startTime/endTime (HH:MM strings, today)
-   • Builds chartData with _ts preserved for 30-min tick logic in the canvas
-   ─────────────────────────────────────────────────────────────────────────────*/
 function exportChartPNGByRange(hist, keys, yDomain, yUnit, yLabel, title, filename, accentColor, startTime, endTime) {
-  if (!hist || hist.length === 0) {
-    return "No data has been recorded yet. Keep the dashboard running to accumulate data.";
-  }
-  if (!startTime || !endTime) {
-    return "Please select both a start and end time.";
-  }
-
-  // Match against the actual dates present in the data (not hardcoded "today")
-  // Each data point has d.t as a ms timestamp. We match HH:MM against that.
-  const [sh, sm] = startTime.split(":").map(Number);
-  const [eh, em] = endTime.split(":").map(Number);
-
-  const sliced = hist.filter(d => {
-    const dt = new Date(d.t);
-    const h = dt.getHours(), m = dt.getMinutes();
-    const pointMins = h * 60 + m;
-    const startMins = sh * 60 + sm;
-    const endMins = eh * 60 + em;
-    return pointMins >= startMins && pointMins <= endMins;
-  });
-
+  if (!hist || hist.length === 0) return "No data recorded yet.";
+  if (!startTime || !endTime) return "Please select both times.";
+  const sliced = filterDataByTime(hist, startTime, endTime);
   if (sliced.length < 2) {
-    // Tell the user what range IS available
-    const firstTs = hist[0].t, lastTs = hist[hist.length - 1].t;
     const fmtAvail = (ms) => new Date(ms).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", hour12: true });
-    return `No data found between ${startTime} and ${endTime}. Available range: ${fmtAvail(firstTs)} → ${fmtAvail(lastTs)} (${hist.length} points).`;
+    return `No data between ${startTime} and ${endTime}. Available: ${fmtAvail(hist[0].t)} → ${fmtAvail(hist[hist.length - 1].t)}.`;
   }
-
-  // Build chartData WITH _ts field preserved (needed for 30-min tick logic in canvas)
   const chartData = sliced.map(d => {
-    const point = {
-      _ts: d.t,
-      time: new Date(d.t).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", second: "2-digit" }),
-    };
+    const point = { _ts: d.t, time: new Date(d.t).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", second: "2-digit" }) };
     keys.forEach(k => { point[k.dataKey] = d[k.dataKey] ?? null; });
     return point;
   });
-
   exportChartPNG(chartData, keys, yDomain, yUnit, yLabel, title, filename, accentColor);
-  return null; // null = success
+  return null;
 }
 
 const exportCSV = (csvText) => {
@@ -869,24 +669,30 @@ export default function Dashboard() {
   const [showExportModal, setShowExportModal] = useState(false);
 
   const emptyData = {
-    Va: 0, Vb: 0, Vc: 0, Ia: 0, Ib: 0, Ic: 0,
-    Pa: 0, Pb: 0, Pc: 0, St_V: 0, St_I: 0, St_P: 0, St_PF: 0, St_F: 0,
+    Va: 0, Vb: 0, Vc: 0,
+    Ia: 0, Ib: 0, Ic: 0,
+    Pa: 0, Pb: 0, Pc: 0,
+    Qa: 0, Qb: 0, Qc: 0,
+    PFa: 0, PFb: 0, PFc: 0,
+    St_V: 0, St_I: 0, St_P: 0, St_Q: 0, St_PF: 0, St_F: 0,
     Timestamp: ""
   };
   const [data, setData] = useState(emptyData);
 
-  // ── FULL history refs (never capped, never cause re-renders on push) ──
-  // These grow for the entire session — 40 hrs at 5 s polling ≈ 28 800 rows ≈ 6 MB
-  const voltageRaw = useRef([]); // { t, Va, Vb, Vc }[]
-  const currentRaw = useRef([]); // { t, Ia, Ib, Ic }[]
-  const powerRaw = useRef([]); // { t, Pa, Pb, Pc }[]
-  const streetRaw = useRef([]); // { t, St_V, St_I, St_P, St_PF, St_F }[]
+  // History refs (unlimited, ref-based)
+  const voltageRaw = useRef([]);
+  const currentRaw = useRef([]);
+  const powerRaw = useRef([]);
+  const reactiveRaw = useRef([]);
+  const pf3Raw = useRef([]);
+  const streetRaw = useRef([]);   // holds St_V, St_I, St_P, St_Q, St_PF, St_F
 
-  // ── DOWNSAMPLED snapshots (React state) — only what charts render ──
-  // Updated once per poll tick via LTTB so charts stay smooth.
+  // Downsampled render state
   const [voltageHist, setVoltageHist] = useState([]);
   const [currentHist, setCurrentHist] = useState([]);
   const [powerHist, setPowerHist] = useState([]);
+  const [reactiveHist, setReactiveHist] = useState([]);
+  const [pf3Hist, setPf3Hist] = useState([]);
   const [streetHist, setStreetHist] = useState([]);
 
   const prevRawRef = useRef(null);
@@ -897,7 +703,9 @@ export default function Dashboard() {
     localStorage.setItem("theme", theme);
   }, [theme, isDark]);
 
-  /* ── Gate values into allowed Y ranges before storing ── */
+  /* ── Gate helper: value inside [lo,hi] or null ── */
+  const gate = (v, lo, hi) => { const n = Number(v); return (!isNaN(n) && n >= lo && n <= hi) ? n : null; };
+
   const fetchData = useCallback(async () => {
     try {
       const res = await fetch(CSV_URL);
@@ -912,9 +720,9 @@ export default function Dashboard() {
       if (prevRawRef.current === rawId) { setLoading(false); return; }
       prevRawRef.current = rawId;
 
-      /* gate(v, lo, hi) → null if out of range (so it won't plot) */
-      const gate = (v, lo, hi) => { const n = Number(v) || 0; return (n >= lo && n <= hi) ? n : null; };
-
+      /* NOTE: Add Q_R, Q_Y, Q_B, PF_R, PF_Y, PF_B, Street_Q columns to your
+         Google Sheet to populate reactive power and 3-phase PF charts.
+         Until those columns exist the charts will show 0 (no values in range). */
       const newData = {
         Va: gate(row["V_R"], Y_LIMITS.voltage.min, Y_LIMITS.voltage.max),
         Vb: gate(row["V_Y"], Y_LIMITS.voltage.min, Y_LIMITS.voltage.max),
@@ -925,12 +733,20 @@ export default function Dashboard() {
         Pa: gate(row["P_R"], Y_LIMITS.power.min, Y_LIMITS.power.max),
         Pb: gate(row["P_Y"], Y_LIMITS.power.min, Y_LIMITS.power.max),
         Pc: gate(row["P_B"], Y_LIMITS.power.min, Y_LIMITS.power.max),
-        St_V: gate(row["Street_V"], Y_LIMITS.streetVI.min, Y_LIMITS.streetVI.max),
-        St_I: gate(row["Street_I"], Y_LIMITS.streetVI.min, Y_LIMITS.streetVI.max),
-        St_P: gate(row["Street_P"], Y_LIMITS.streetPPF.min, Y_LIMITS.streetPPF.max),
-        St_PF: gate(row["Street_PF"], Y_LIMITS.streetPPF.min, Y_LIMITS.streetPPF.max),
-        St_F: gate(row["Street_F"], Y_LIMITS.streetPPF.min, Y_LIMITS.streetPPF.max),
-        Timestamp: new Date().toLocaleTimeString()
+        Qa: gate(row["Q_R"], Y_LIMITS.reactive.min, Y_LIMITS.reactive.max),
+        Qb: gate(row["Q_Y"], Y_LIMITS.reactive.min, Y_LIMITS.reactive.max),
+        Qc: gate(row["Q_B"], Y_LIMITS.reactive.min, Y_LIMITS.reactive.max),
+        PFa: gate(row["PF_R"], Y_LIMITS.pf3phase.min, Y_LIMITS.pf3phase.max),
+        PFb: gate(row["PF_Y"], Y_LIMITS.pf3phase.min, Y_LIMITS.pf3phase.max),
+        PFc: gate(row["PF_B"], Y_LIMITS.pf3phase.min, Y_LIMITS.pf3phase.max),
+        // DER / Street — each has its own correct range
+        St_V: gate(row["Street_V"], Y_LIMITS.derV.min, Y_LIMITS.derV.max),
+        St_I: gate(row["Street_I"], Y_LIMITS.derI.min, Y_LIMITS.derI.max),
+        St_P: gate(row["Street_P"], Y_LIMITS.derP.min, Y_LIMITS.derP.max),
+        St_Q: gate(row["Q_S"], Y_LIMITS.reactive.min, Y_LIMITS.reactive.max),
+        St_PF: gate(row["Street_PF"], Y_LIMITS.derPF.min, Y_LIMITS.derPF.max),
+        St_F: gate(row["Street_F"], Y_LIMITS.derFreq.min, Y_LIMITS.derFreq.max),
+        Timestamp: new Date().toLocaleString('en-GB')
       };
 
       const prev = prevDataRef.current;
@@ -945,39 +761,30 @@ export default function Dashboard() {
       prevDataRef.current = newData;
       const now = Date.now();
 
-      // ── Push into unlimited raw refs (no React state cost) ──
       voltageRaw.current.push({ t: now, Va: newData.Va, Vb: newData.Vb, Vc: newData.Vc });
       currentRaw.current.push({ t: now, Ia: newData.Ia, Ib: newData.Ib, Ic: newData.Ic });
       powerRaw.current.push({ t: now, Pa: newData.Pa, Pb: newData.Pb, Pc: newData.Pc });
-      streetRaw.current.push({ t: now, St_V: newData.St_V, St_I: newData.St_I, St_P: newData.St_P, St_PF: newData.St_PF, St_F: newData.St_F });
+      reactiveRaw.current.push({ t: now, Qa: newData.Qa, Qb: newData.Qb, Qc: newData.Qc });
+      pf3Raw.current.push({ t: now, PFa: newData.PFa, PFb: newData.PFb, PFc: newData.PFc });
+      streetRaw.current.push({ t: now, St_V: newData.St_V, St_I: newData.St_I, St_P: newData.St_P, St_Q: newData.St_Q, St_PF: newData.St_PF, St_F: newData.St_F });
 
-      // ── Push LTTB-downsampled snapshots to React state for chart rendering ──
-      // lttbDownsample keeps MAX_RENDER_PTS representative points from the full array,
-      // so the chart stays fast even after 40 hrs of data.
       setVoltageHist(lttbDownsample(voltageRaw.current, MAX_RENDER_PTS));
       setCurrentHist(lttbDownsample(currentRaw.current, MAX_RENDER_PTS));
       setPowerHist(lttbDownsample(powerRaw.current, MAX_RENDER_PTS));
+      setReactiveHist(lttbDownsample(reactiveRaw.current, MAX_RENDER_PTS));
+      setPf3Hist(lttbDownsample(pf3Raw.current, MAX_RENDER_PTS));
       setStreetHist(lttbDownsample(streetRaw.current, MAX_RENDER_PTS));
 
       if (text && text.length > 10) window.__SMARTGRID_CSV__ = text;
       setLoading(false);
     } catch { setStatus("Disconnected"); setLoading(false); }
-  }, []);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  /* ══════════════════════════════════════════════════════════════════
-     HISTORICAL BACKFILL — runs ONCE on mount.
-     Reads every row in the Sheet, filters to TODAY only, parses
-     timestamps, and pre-fills the raw refs so that:
-       • Charts immediately show all of today's data from row 1
-       • Time-range export works for any window that already passed
-       • Live polling continues seamlessly on top of backfill data
-  ══════════════════════════════════════════════════════════════════ */
-  const backfilledRef = useRef(false); // prevent running twice in StrictMode
-
+  /* ── Historical backfill ── */
+  const backfilledRef = useRef(false);
   const backfillHistory = useCallback(async () => {
     if (backfilledRef.current) return;
     backfilledRef.current = true;
-
     try {
       const res = await fetch(CSV_URL);
       if (!res.ok) return;
@@ -985,130 +792,71 @@ export default function Dashboard() {
       const parsed = Papa.parse(text, { header: true, dynamicTyping: true });
       if (!parsed.data.length) return;
 
-      const gate = (v, lo, hi) => { const n = Number(v) || 0; return (n >= lo && n <= hi) ? n : null; };
-
-      // Today's midnight in ms — used to filter rows to today only
-      const todayMidnight = (() => {
-        const d = new Date(); d.setHours(0, 0, 0, 0); return d.getTime();
-      })();
+      const g = (v, lo, hi) => { const n = Number(v); return (!isNaN(n) && n >= lo && n <= hi) ? n : null; };
+      const todayMidnight = (() => { const d = new Date(); d.setHours(0, 0, 0, 0); return d.getTime(); })();
       const tomorrowMidnight = todayMidnight + 86400000;
 
-      // Attempt to parse timestamp string from Sheet into a real ms value.
-      // Sheet timestamps are typically "DD/MM/YYYY HH:MM:SS" or "M/D/YYYY H:MM:SS"
-      // We try multiple formats and fall back to Date.parse.
       const parseSheetTs = (raw) => {
         if (!raw) return null;
         const s = String(raw).trim();
-
-        // Format 1: "DD/MM/YYYY HH:MM:SS" or "D/M/YYYY H:MM:SS"
         const m1 = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})[, ]+(\d{1,2}):(\d{2}):(\d{2})/);
-        if (m1) {
-          const [, d, mo, y, h, mi, sec] = m1.map(Number);
-          return new Date(y, mo - 1, d, h, mi, sec).getTime();
-        }
-        // Format 2: "YYYY-MM-DD HH:MM:SS"
+        if (m1) { const [, d, mo, y, h, mi, sec] = m1.map(Number); return new Date(y, mo - 1, d, h, mi, sec).getTime(); }
         const m2 = s.match(/^(\d{4})-(\d{2})-(\d{2})[T ]+(\d{2}):(\d{2}):(\d{2})/);
-        if (m2) {
-          const [, y, mo, d, h, mi, sec] = m2.map(Number);
-          return new Date(y, mo - 1, d, h, mi, sec).getTime();
-        }
-        // Format 3: "MM/DD/YYYY HH:MM:SS" (US style)
-        const m3 = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})[, ]+(\d{1,2}):(\d{2}):(\d{2})/);
-        if (m3) {
-          const [, mo, d, y, h, mi, sec] = m3.map(Number);
-          const ts = new Date(y, mo - 1, d, h, mi, sec).getTime();
-          if (!isNaN(ts)) return ts;
-        }
-        // Fallback: native parse
-        const fb = Date.parse(s);
-        return isNaN(fb) ? null : fb;
+        if (m2) { const [, y, mo, d, h, mi, sec] = m2.map(Number); return new Date(y, mo - 1, d, h, mi, sec).getTime(); }
+        const fb = Date.parse(s); return isNaN(fb) ? null : fb;
       };
 
       const validRows = parsed.data.filter(r => r["Timestamp"]);
-
-      // Process all rows, filter to today, build history arrays
-      const vArr = [], iArr = [], pArr = [], sArr = [];
-      const seenTs = new Set(); // deduplicate by ms timestamp
+      const vArr = [], iArr = [], pArr = [], qArr = [], pfArr = [], sArr = [];
+      const seenTs = new Set();
 
       validRows.forEach(row => {
         const t = parseSheetTs(row["Timestamp"]);
-        if (!t || t < todayMidnight || t >= tomorrowMidnight) return; // not today
-        if (seenTs.has(t)) return; // duplicate row
+        if (!t || t < todayMidnight || t >= tomorrowMidnight) return;
+        if (seenTs.has(t)) return;
         seenTs.add(t);
-
-        const pt = {
-          Va: gate(row["V_R"], Y_LIMITS.voltage.min, Y_LIMITS.voltage.max),
-          Vb: gate(row["V_Y"], Y_LIMITS.voltage.min, Y_LIMITS.voltage.max),
-          Vc: gate(row["V_B"], Y_LIMITS.voltage.min, Y_LIMITS.voltage.max),
-          Ia: gate(row["I_R"], Y_LIMITS.current.min, Y_LIMITS.current.max),
-          Ib: gate(row["I_Y"], Y_LIMITS.current.min, Y_LIMITS.current.max),
-          Ic: gate(row["I_B"], Y_LIMITS.current.min, Y_LIMITS.current.max),
-          Pa: gate(row["P_R"], Y_LIMITS.power.min, Y_LIMITS.power.max),
-          Pb: gate(row["P_Y"], Y_LIMITS.power.min, Y_LIMITS.power.max),
-          Pc: gate(row["P_B"], Y_LIMITS.power.min, Y_LIMITS.power.max),
-          St_V: gate(row["Street_V"], Y_LIMITS.streetVI.min, Y_LIMITS.streetVI.max),
-          St_I: gate(row["Street_I"], Y_LIMITS.streetVI.min, Y_LIMITS.streetVI.max),
-          St_P: gate(row["Street_P"], Y_LIMITS.streetPPF.min, Y_LIMITS.streetPPF.max),
-          St_PF: gate(row["Street_PF"], Y_LIMITS.streetPPF.min, Y_LIMITS.streetPPF.max),
-          St_F: gate(row["Street_F"], Y_LIMITS.streetPPF.min, Y_LIMITS.streetPPF.max),
-        };
-
-        vArr.push({ t, Va: pt.Va, Vb: pt.Vb, Vc: pt.Vc });
-        iArr.push({ t, Ia: pt.Ia, Ib: pt.Ib, Ic: pt.Ic });
-        pArr.push({ t, Pa: pt.Pa, Pb: pt.Pb, Pc: pt.Pc });
-        sArr.push({ t, St_V: pt.St_V, St_I: pt.St_I, St_P: pt.St_P, St_PF: pt.St_PF, St_F: pt.St_F });
+        vArr.push({ t, Va: g(row["V_R"], Y_LIMITS.voltage.min, Y_LIMITS.voltage.max), Vb: g(row["V_Y"], Y_LIMITS.voltage.min, Y_LIMITS.voltage.max), Vc: g(row["V_B"], Y_LIMITS.voltage.min, Y_LIMITS.voltage.max) });
+        iArr.push({ t, Ia: g(row["I_R"], Y_LIMITS.current.min, Y_LIMITS.current.max), Ib: g(row["I_Y"], Y_LIMITS.current.min, Y_LIMITS.current.max), Ic: g(row["I_B"], Y_LIMITS.current.min, Y_LIMITS.current.max) });
+        pArr.push({ t, Pa: g(row["P_R"], Y_LIMITS.power.min, Y_LIMITS.power.max), Pb: g(row["P_Y"], Y_LIMITS.power.min, Y_LIMITS.power.max), Pc: g(row["P_B"], Y_LIMITS.power.min, Y_LIMITS.power.max) });
+        qArr.push({ t, Qa: g(row["Q_R"], Y_LIMITS.reactive.min, Y_LIMITS.reactive.max), Qb: g(row["Q_Y"], Y_LIMITS.reactive.min, Y_LIMITS.reactive.max), Qc: g(row["Q_B"], Y_LIMITS.reactive.min, Y_LIMITS.reactive.max) });
+        pfArr.push({ t, PFa: g(row["PF_R"], Y_LIMITS.pf3phase.min, Y_LIMITS.pf3phase.max), PFb: g(row["PF_Y"], Y_LIMITS.pf3phase.min, Y_LIMITS.pf3phase.max), PFc: g(row["PF_B"], Y_LIMITS.pf3phase.min, Y_LIMITS.pf3phase.max) });
+        sArr.push({
+          t,
+          St_V: g(row["Street_V"], Y_LIMITS.derV.min, Y_LIMITS.derV.max),
+          St_I: g(row["Street_I"], Y_LIMITS.derI.min, Y_LIMITS.derI.max),
+          St_P: g(row["Street_P"], Y_LIMITS.derP.min, Y_LIMITS.derP.max),
+          St_Q: g(row["Q_S"], Y_LIMITS.reactive.min, Y_LIMITS.reactive.max),
+          St_PF: g(row["Street_PF"], Y_LIMITS.derPF.min, Y_LIMITS.derPF.max),
+          St_F: g(row["Street_F"], Y_LIMITS.derFreq.min, Y_LIMITS.derFreq.max),
+        });
       });
 
-      // Sort by time (Sheet rows should already be sorted, but be defensive)
       const byT = (a, b) => a.t - b.t;
-      vArr.sort(byT); iArr.sort(byT); pArr.sort(byT); sArr.sort(byT);
+      vArr.sort(byT); iArr.sort(byT); pArr.sort(byT); qArr.sort(byT); pfArr.sort(byT); sArr.sort(byT);
+      if (!vArr.length) return;
 
-      if (!vArr.length) return; // no today rows found — skip
-
-      // Write into refs atomically, then update chart state once
-      voltageRaw.current = vArr;
-      currentRaw.current = iArr;
-      powerRaw.current = pArr;
-      streetRaw.current = sArr;
-
-      // Track the last backfilled row so live polling doesn't re-add it
+      voltageRaw.current = vArr; currentRaw.current = iArr; powerRaw.current = pArr;
+      reactiveRaw.current = qArr; pf3Raw.current = pfArr; streetRaw.current = sArr;
       prevRawRef.current = JSON.stringify(validRows[validRows.length - 1]);
 
-      // Update chart state with LTTB-downsampled backfill data
       setVoltageHist(lttbDownsample(vArr, MAX_RENDER_PTS));
       setCurrentHist(lttbDownsample(iArr, MAX_RENDER_PTS));
       setPowerHist(lttbDownsample(pArr, MAX_RENDER_PTS));
+      setReactiveHist(lttbDownsample(qArr, MAX_RENDER_PTS));
+      setPf3Hist(lttbDownsample(pfArr, MAX_RENDER_PTS));
       setStreetHist(lttbDownsample(sArr, MAX_RENDER_PTS));
 
-      // Set KPI cards to the latest backfilled value
-      const last = vArr[vArr.length - 1];
-      const lastI = iArr[iArr.length - 1];
-      const lastP = pArr[pArr.length - 1];
-      const lastS = sArr[sArr.length - 1];
-      setData({
-        Va: last.Va, Vb: last.Vb, Vc: last.Vc,
-        Ia: lastI.Ia, Ib: lastI.Ib, Ic: lastI.Ic,
-        Pa: lastP.Pa, Pb: lastP.Pb, Pc: lastP.Pc,
-        St_V: lastS.St_V, St_I: lastS.St_I, St_P: lastS.St_P, St_PF: lastS.St_PF, St_F: lastS.St_F,
-        Timestamp: new Date(last.t).toLocaleTimeString()
-      });
+      const last = vArr[vArr.length - 1], lastI = iArr[iArr.length - 1], lastP = pArr[pArr.length - 1];
+      const lastQ = qArr[qArr.length - 1], lastPF = pfArr[pfArr.length - 1], lastS = sArr[sArr.length - 1];
+      setData({ Va: last.Va, Vb: last.Vb, Vc: last.Vc, Ia: lastI.Ia, Ib: lastI.Ib, Ic: lastI.Ic, Pa: lastP.Pa, Pb: lastP.Pb, Pc: lastP.Pc, Qa: lastQ.Qa, Qb: lastQ.Qb, Qc: lastQ.Qc, PFa: lastPF.PFa, PFb: lastPF.PFb, PFc: lastPF.PFc, St_V: lastS.St_V, St_I: lastS.St_I, St_P: lastS.St_P, St_Q: lastS.St_Q, St_PF: lastS.St_PF, St_F: lastS.St_F, Timestamp: new Date(last.t).toLocaleTimeString() });
       setStatus("Connected");
-      setEvents(p => [{
-        msg: `Backfilled ${vArr.length} historical rows from today`,
-        time: Date.now(), level: "success"
-      }, ...p].slice(0, MAX_EVENTS));
+      setEvents(p => [{ msg: `Backfilled ${vArr.length} rows from today`, time: Date.now(), level: "success" }, ...p].slice(0, MAX_EVENTS));
       setLoading(false);
-
-    } catch (e) {
-      console.warn("Backfill failed:", e);
-      // Non-fatal — live polling will still work
-    }
+    } catch (e) { console.warn("Backfill failed:", e); }
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
-    // 1. Backfill all of today's rows immediately on mount
     backfillHistory();
-    // 2. Start live polling — fetchData skips rows already seen via prevRawRef
     const id = setInterval(fetchData, POLL_INTERVAL);
     return () => clearInterval(id);
   }, [backfillHistory, fetchData]);
@@ -1129,77 +877,65 @@ export default function Dashboard() {
     { label: "Power Y", value: smallNumber(data.Pb, 1), unit: "W", accent: "pink" },
     { label: "Power B", value: smallNumber(data.Pc, 1), unit: "W", accent: "pink" },
   ];
+  const reactiveCards = [
+    { label: "React. Power R", value: smallNumber(data.Qa, 1), unit: "VAR", accent: "violet" },
+    { label: "React. Power Y", value: smallNumber(data.Qb, 1), unit: "VAR", accent: "violet" },
+    { label: "React. Power B", value: smallNumber(data.Qc, 1), unit: "VAR", accent: "violet" },
+  ];
+  const pf3Cards = [
+    { label: "Power Factor R", value: smallNumber(data.PFa, 3), unit: "PF", accent: "cyan" },
+    { label: "Power Factor Y", value: smallNumber(data.PFb, 3), unit: "PF", accent: "cyan" },
+    { label: "Power Factor B", value: smallNumber(data.PFc, 3), unit: "PF", accent: "cyan" },
+  ];
+  // DER section — 6 cards now (added Reactive Power)
   const streetCards = [
-    { label: "Street Voltage", value: smallNumber(data.St_V, 1), unit: "V", accent: "green" },
-    { label: "Street Current", value: smallNumber(data.St_I, 3), unit: "A", accent: "green" },
-    { label: "Street Power", value: smallNumber(data.St_P, 1), unit: "W", accent: "green" },
-    { label: "Street PF", value: smallNumber(data.St_PF, 2), unit: "PF", accent: "blue" },
-    { label: "Street Freq", value: smallNumber(data.St_F, 1), unit: "Hz", accent: "orange" },
+    { label: "Voltage", value: smallNumber(data.St_V, 1), unit: "V", accent: "green" },
+    { label: "Current", value: smallNumber(data.St_I, 3), unit: "A", accent: "green" },
+    { label: "Power", value: smallNumber(data.St_P, 1), unit: "W", accent: "green" },
+    { label: "Reactive Power", value: smallNumber(data.St_Q, 1), unit: "VAR", accent: "violet" }, // NEW
+    { label: "Power factor", value: smallNumber(data.St_PF, 2), unit: "PF", accent: "blue" },
+    { label: "Frequency", value: smallNumber(data.St_F, 2), unit: "Hz", accent: "orange" },
   ];
 
   /* ── Chart keys ── */
   const vKeys = [{ dataKey: "Va", name: "V_R", color: "#3b82f6" }, { dataKey: "Vb", name: "V_Y", color: "#06b6d4" }, { dataKey: "Vc", name: "V_B", color: "#f59e0b" }];
   const iKeys = [{ dataKey: "Ia", name: "I_R", color: "#3b82f6" }, { dataKey: "Ib", name: "I_Y", color: "#06b6d4" }, { dataKey: "Ic", name: "I_B", color: "#f59e0b" }];
   const pKeys = [{ dataKey: "Pa", name: "P_R", color: "#ec4899" }, { dataKey: "Pb", name: "P_Y", color: "#8b5cf6" }, { dataKey: "Pc", name: "P_B", color: "#f59e0b" }];
-  const stVIKeys = [{ dataKey: "St_V", name: "DER V", color: "#10b981" }, { dataKey: "St_I", name: "DER I", color: "#06b6d4" }];
-  const stPFKeys = [{ dataKey: "St_P", name: "DER Power", color: "#10b981" }, { dataKey: "St_PF", name: "DER PF", color: "#f59e0b" }, { dataKey: "St_F", name: "DER Freq", color: "#ec4899" }];
+  const qKeys = [{ dataKey: "Qa", name: "Q_R", color: "#a855f7" }, { dataKey: "Qb", name: "Q_Y", color: "#d946ef" }, { dataKey: "Qc", name: "Q_B", color: "#f59e0b" }];
+  const pf3Keys = [{ dataKey: "PFa", name: "PF_R", color: "#06b6d4" }, { dataKey: "PFb", name: "PF_Y", color: "#10b981" }, { dataKey: "PFc", name: "PF_B", color: "#f59e0b" }];
+  // DER split keys
+  const derVKeys = [{ dataKey: "St_V", name: "V", color: "#10b981" }];
+  const derIKeys = [{ dataKey: "St_I", name: "I", color: "#06b6d4" }];
+  // FIX: Power + Freq on one chart (Power 0-3000 dominates scale)
+  const derPFrKeys = [{ dataKey: "St_P", name: "Power(W)", color: "#10b981" }, { dataKey: "St_F", name: "Freq(Hz)", color: "#f59e0b" }];
+  // FIX: Reactive Power + PF on one chart (Q 0-2500 dominates scale)
+  const derQPFKeys = [{ dataKey: "St_Q", name: "React.Pwr", color: "#a855f7" }, { dataKey: "St_PF", name: "PF", color: "#ec4899" }];
 
-  const vFilterOpts = [{ value: "all", label: "All Phases" }, { value: "Va", label: "Phase R (Va)" }, { value: "Vb", label: "Phase Y (Vb)" }, { value: "Vc", label: "Phase B (Vc)" }];
-  const iFilterOpts = [{ value: "all", label: "All Phases" }, { value: "Ia", label: "Phase R (Ia)" }, { value: "Ib", label: "Phase Y (Ib)" }, { value: "Ic", label: "Phase B (Ic)" }];
-  const pFilterOpts = [{ value: "all", label: "All Phases" }, { value: "Pa", label: "Phase R (Pa)" }, { value: "Pb", label: "Phase Y (Pb)" }, { value: "Pc", label: "Phase B (Pc)" }];
+  const vFilterOpts = [{ value: "all", label: "All Phases" }, { value: "Va", label: "Phase R" }, { value: "Vb", label: "Phase Y" }, { value: "Vc", label: "Phase B" }];
+  const iFilterOpts = [{ value: "all", label: "All Phases" }, { value: "Ia", label: "Phase R" }, { value: "Ib", label: "Phase Y" }, { value: "Ic", label: "Phase B" }];
+  const pFilterOpts = [{ value: "all", label: "All Phases" }, { value: "Pa", label: "Phase R" }, { value: "Pb", label: "Phase Y" }, { value: "Pc", label: "Phase B" }];
+  const qFilterOpts = [{ value: "all", label: "All Phases" }, { value: "Qa", label: "Phase R" }, { value: "Qb", label: "Phase Y" }, { value: "Qc", label: "Phase B" }];
+  const pf3FilterOpts = [{ value: "all", label: "All Phases" }, { value: "PFa", label: "Phase R" }, { value: "PFb", label: "Phase Y" }, { value: "PFc", label: "Phase B" }];
 
-  /* ─────────────────────────────────────────────────────────────────────
-     TIME-RANGE EXPORT HANDLER
-     Resolves which hist + keys to use based on chartType selection,
-     then slices by time range and exports.
-  ──────────────────────────────────────────────────────────────────── */
+  /* ── Export handler ── */
   const handleRangeExport = useCallback((chartType, startTime, endTime) => {
-    // IMPORTANT: use the *raw* refs (not downsampled state) so every recorded
-    // data point in the requested window is included in the export image.
     const configs = {
-      voltage: {
-        hist: voltageRaw.current, keys: vKeys,
-        yDomain: [Y_LIMITS.voltage.min, Y_LIMITS.voltage.max],
-        yUnit: "V", yLabel: "Voltage (V)",
-        title: "Three Phase Voltages", filename: "three_phase_voltage", accent: "#2563eb"
-      },
-      current: {
-        hist: currentRaw.current, keys: iKeys,
-        yDomain: [Y_LIMITS.current.min, Y_LIMITS.current.max],
-        yUnit: "A", yLabel: "Current (A)",
-        title: "Three Phase Currents", filename: "three_phase_current", accent: "#9333ea"
-      },
-      power: {
-        hist: powerRaw.current, keys: pKeys,
-        yDomain: [Y_LIMITS.power.min, Y_LIMITS.power.max],
-        yUnit: "W", yLabel: "Power (W)",
-        title: "Three Phase Powers", filename: "three_phase_power", accent: "#db2777"
-      },
-      streetVI: {
-        hist: streetRaw.current, keys: stVIKeys,
-        yDomain: [Y_LIMITS.streetVI.min, Y_LIMITS.streetVI.max],
-        yUnit: "", yLabel: "V / A",
-        title: "DER Voltage & Current", filename: "der_voltage_current", accent: "#059669"
-      },
-      streetPPF: {
-        hist: streetRaw.current, keys: stPFKeys,
-        yDomain: [Y_LIMITS.streetPPF.min, Y_LIMITS.streetPPF.max],
-        yUnit: "", yLabel: "PF",
-        title: "DER Power · PF · Frequency", filename: "der_power_pf_freq", accent: "#0d9488"
-      },
+      voltage: { hist: voltageRaw.current, keys: vKeys, yDomain: [Y_LIMITS.voltage.min, Y_LIMITS.voltage.max], yUnit: "V", yLabel: "Voltage (V)", title: "Three Phase Voltages", filename: "three_phase_voltage", accent: "#2563eb" },
+      current: { hist: currentRaw.current, keys: iKeys, yDomain: [Y_LIMITS.current.min, Y_LIMITS.current.max], yUnit: "A", yLabel: "Current (A)", title: "Three Phase Currents", filename: "three_phase_current", accent: "#9333ea" },
+      power: { hist: powerRaw.current, keys: pKeys, yDomain: [Y_LIMITS.power.min, Y_LIMITS.power.max], yUnit: "W", yLabel: "Power (W)", title: "Three Phase Powers", filename: "three_phase_power", accent: "#db2777" },
+      reactive: { hist: reactiveRaw.current, keys: qKeys, yDomain: [Y_LIMITS.reactive.min, Y_LIMITS.reactive.max], yUnit: " VAR", yLabel: "Reactive Power (VAR)", title: "Three Phase Reactive Powers", filename: "three_phase_reactive", accent: "#7c3aed" },
+      pf3phase: { hist: pf3Raw.current, keys: pf3Keys, yDomain: [Y_LIMITS.pf3phase.min, Y_LIMITS.pf3phase.max], yUnit: "", yLabel: "Power Factor", title: "Three Phase Power Factors", filename: "three_phase_pf", accent: "#0891b2" },
+      derV: { hist: streetRaw.current, keys: derVKeys, yDomain: [Y_LIMITS.derV.min, Y_LIMITS.derV.max], yUnit: "V", yLabel: "DER Voltage (V)", title: "DER Voltage", filename: "der_voltage", accent: "#059669" },
+      derI: { hist: streetRaw.current, keys: derIKeys, yDomain: [Y_LIMITS.derI.min, Y_LIMITS.derI.max], yUnit: "A", yLabel: "DER Current (A)", title: "DER Current", filename: "der_current", accent: "#0284c7" },
+      derPFreq: { hist: streetRaw.current, keys: derPFrKeys, yDomain: [Y_LIMITS.derP.min, Y_LIMITS.derP.max], yUnit: "W", yLabel: "Power (W)", title: "DER Power + Frequency", filename: "der_power_freq", accent: "#059669" },
+      derQPF: { hist: streetRaw.current, keys: derQPFKeys, yDomain: [Y_LIMITS.reactive.min, Y_LIMITS.reactive.max], yUnit: "", yLabel: "VAR / PF", title: "DER Reactive Power + PF", filename: "der_reactive_pf", accent: "#7c3aed" },
     };
     const cfg = configs[chartType];
     if (!cfg) return null;
-    // Returns null on success, or an error string to show inline in the modal
-    return exportChartPNGByRange(
-      cfg.hist, cfg.keys, cfg.yDomain, cfg.yUnit, cfg.yLabel,
-      cfg.title, cfg.filename, cfg.accent,
-      startTime, endTime
-    );
+    return exportChartPNGByRange(cfg.hist, cfg.keys, cfg.yDomain, cfg.yUnit, cfg.yLabel, cfg.title, cfg.filename, cfg.accent, startTime, endTime);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [vKeys, iKeys, pKeys, stVIKeys, stPFKeys]);
+  }, []);
 
-  /* ── Full-history export: reads raw refs → every single recorded point ── */
   const buildChartDataFull = (rawRef, keys) => rawRef.current.map(d => {
     const p = { _ts: d.t, time: new Date(d.t).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", second: "2-digit" }) };
     keys.forEach(k => { p[k.dataKey] = d[k.dataKey] ?? null; });
@@ -1219,38 +955,20 @@ export default function Dashboard() {
         <div className="absolute left-1/2 bottom-0 w-72 h-72 rounded-full bg-emerald-500/10 blur-[100px]" />
       </div>
 
-      {/* ══ TIME-RANGE EXPORT MODAL ══ */}
       <TimeRangeExportModal
-        isOpen={showExportModal}
-        onClose={() => setShowExportModal(false)}
-        onExport={handleRangeExport}
-        isDark={isDark}
-        rawRef={voltageRaw}
+        isOpen={showExportModal} onClose={() => setShowExportModal(false)}
+        onExport={handleRangeExport} isDark={isDark} rawRef={voltageRaw}
       />
 
       {/* ══ HEADER ══ */}
-      <header className={`rounded-2xl px-6 py-4 mb-6 shadow-xl backdrop-blur-xl border border-white/20
-        ${isDark ? "bg-white/10" : "bg-white/70"}`}>
-
-        {/* Row 1 */}
+      <header className={`rounded-2xl px-6 py-4 mb-6 shadow-xl backdrop-blur-xl border border-white/20 ${isDark ? "bg-white/10" : "bg-white/70"}`}>
         <div className="flex items-center justify-between gap-4 mb-3">
-          {/* ── Title block — no logo, clean professional layout ── */}
           <div className="flex flex-col gap-0.5 min-w-0">
-            {/* Eyebrow label */}
             <p className={`text-[10px] font-semibold uppercase tracking-[0.18em] ${isDark ? "text-indigo-400" : "text-indigo-500"}`}>
               Real-time Energy Monitoring
             </p>
-            {/* Main title — gradient, truncates gracefully on small screens */}
-            <h1
-              className="font-black text-transparent bg-clip-text leading-tight truncate"
-              style={{
-                fontSize: "clamp(14px, 2vw, 20px)",
-                background: "linear-gradient(90deg,#3b82f6 0%,#6366f1 45%,#a855f7 100%)",
-                WebkitBackgroundClip: "text",
-                WebkitTextFillColor: "transparent",
-                letterSpacing: "-0.01em",
-              }}
-            >
+            <h1 className="font-black text-transparent bg-clip-text leading-tight truncate"
+              style={{ fontSize: "clamp(14px,2vw,20px)", background: "linear-gradient(90deg,#3b82f6 0%,#6366f1 45%,#a855f7 100%)", WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent", letterSpacing: "-0.01em" }}>
               Dynamic Phase Reconfiguration in DER-Integrated Distribution Feeders
             </h1>
           </div>
@@ -1258,67 +976,44 @@ export default function Dashboard() {
             <span className={`text-xs hidden sm:block ${isDark ? "opacity-70" : "opacity-55"}`}>
               {loading ? "Loading…" : data.Timestamp}
             </span>
-            <span className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 border
-              ${status === "Connected" ? "bg-emerald-100 text-emerald-800 border-emerald-400" : "bg-rose-100 text-rose-800 border-rose-400"}`}>
+            <span className={`px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 border ${status === "Connected" ? "bg-emerald-100 text-emerald-800 border-emerald-400" : "bg-rose-100 text-rose-800 border-rose-400"}`}>
               <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 animate-pulse ${status === "Connected" ? "bg-emerald-500" : "bg-rose-500"}`} />
               {status}
             </span>
             <button onClick={() => setTheme(isDark ? "light" : "dark")}
-              className={`px-3 py-1.5 text-xs rounded-lg font-medium border hover:scale-105 transition-all
-                ${isDark ? "bg-slate-700 text-slate-200 border-slate-600" : "bg-slate-200 text-slate-700 border-slate-300"}`}>
+              className={`px-3 py-1.5 text-xs rounded-lg font-medium border hover:scale-105 transition-all ${isDark ? "bg-slate-700 text-slate-200 border-slate-600" : "bg-slate-200 text-slate-700 border-slate-300"}`}>
               {isDark ? "☀️ Light" : "🌙 Dark"}
             </button>
           </div>
         </div>
 
-        {/* Divider */}
         <div className={`border-t mb-3 ${isDark ? "border-white/20" : "border-slate-200"}`} />
 
-        {/* Row 2: export buttons */}
+        {/* Export buttons */}
         <div className="flex flex-wrap items-center gap-2">
           <span className={`text-xs font-semibold uppercase tracking-wider mr-1 ${isDark ? "text-slate-400" : "text-slate-500"}`}>Export:</span>
-
-          {/* ── Full-history PNG exports (original buttons, unchanged) ── */}
           {[
-            {
-              label: "⬇ Voltage PNG", bg: "bg-blue-600 hover:bg-blue-700",
-              fn: () => exportChartPNG(buildChartDataFull(voltageRaw, vKeys), vKeys, [Y_LIMITS.voltage.min, Y_LIMITS.voltage.max], "V", "Voltage (V)", "Three Phase Voltage", "three_phase_voltage", "#2563eb")
-            },
-            {
-              label: "⬇ Current PNG", bg: "bg-purple-600 hover:bg-purple-700",
-              fn: () => exportChartPNG(buildChartDataFull(currentRaw, iKeys), iKeys, [Y_LIMITS.current.min, Y_LIMITS.current.max], "A", "Current (A)", "Three Phase Current", "three_phase_current", "#9333ea")
-            },
-            {
-              label: "⬇ Power PNG", bg: "bg-pink-600 hover:bg-pink-700",
-              fn: () => exportChartPNG(buildChartDataFull(powerRaw, pKeys), pKeys, [Y_LIMITS.power.min, Y_LIMITS.power.max], "W", "Power (W)", "Three Phase Power", "three_phase_power", "#db2777")
-            },
-            {
-              label: "⬇ DER V&I PNG", bg: "bg-emerald-600 hover:bg-emerald-700",
-              fn: () => exportChartPNG(buildChartDataFull(streetRaw, stVIKeys), stVIKeys, [Y_LIMITS.streetVI.min, Y_LIMITS.streetVI.max], "", "V / A", "DER (Rooftop) Voltage & Current", "der_voltage_current", "#059669")
-            },
-            {
-              label: "⬇ DER PF PNG", bg: "bg-teal-600 hover:bg-teal-700",
-              fn: () => exportChartPNG(buildChartDataFull(streetRaw, stPFKeys), stPFKeys, [Y_LIMITS.streetPPF.min, Y_LIMITS.streetPPF.max], "", "PF", "DER (Rooftop) Power · PF · Frequency", "der_power_pf_freq", "#0d9488")
-            },
+            { label: "⬇ Voltage PNG", bg: "bg-blue-600 hover:bg-blue-700", fn: () => exportChartPNG(buildChartDataFull(voltageRaw, vKeys), vKeys, [Y_LIMITS.voltage.min, Y_LIMITS.voltage.max], "V", "Voltage (V)", "Three Phase Voltages", "three_phase_voltage", "#2563eb") },
+            { label: "⬇ Current PNG", bg: "bg-purple-600 hover:bg-purple-700", fn: () => exportChartPNG(buildChartDataFull(currentRaw, iKeys), iKeys, [Y_LIMITS.current.min, Y_LIMITS.current.max], "A", "Current (A)", "Three Phase Currents", "three_phase_current", "#9333ea") },
+            { label: "⬇ Power PNG", bg: "bg-pink-600 hover:bg-pink-700", fn: () => exportChartPNG(buildChartDataFull(powerRaw, pKeys), pKeys, [Y_LIMITS.power.min, Y_LIMITS.power.max], "W", "Power (W)", "Three Phase Powers", "three_phase_power", "#db2777") },
+            { label: "⬇ React. PNG", bg: "bg-violet-600 hover:bg-violet-700", fn: () => exportChartPNG(buildChartDataFull(reactiveRaw, qKeys), qKeys, [Y_LIMITS.reactive.min, Y_LIMITS.reactive.max], " VAR", "Reactive Power (VAR)", "Three Phase Reactive Powers", "three_phase_reactive", "#7c3aed") },
+            { label: "⬇ PF PNG", bg: "bg-cyan-600 hover:bg-cyan-700", fn: () => exportChartPNG(buildChartDataFull(pf3Raw, pf3Keys), pf3Keys, [Y_LIMITS.pf3phase.min, Y_LIMITS.pf3phase.max], "", "Power Factor", "Three Phase Power Factors", "three_phase_pf", "#0891b2") },
+            { label: "⬇ V PNG", bg: "bg-emerald-600 hover:bg-emerald-700", fn: () => exportChartPNG(buildChartDataFull(streetRaw, derVKeys), derVKeys, [Y_LIMITS.derV.min, Y_LIMITS.derV.max], "V", "DER Voltage (V)", "DER Voltage", "der_voltage", "#059669") },
+            { label: "⬇ I PNG", bg: "bg-sky-600 hover:bg-sky-700", fn: () => exportChartPNG(buildChartDataFull(streetRaw, derIKeys), derIKeys, [Y_LIMITS.derI.min, Y_LIMITS.derI.max], "A", "DER Current (A)", "DER Current", "der_current", "#0284c7") },
+            { label: "⬇ P+F PNG", bg: "bg-teal-600 hover:bg-teal-700", fn: () => exportChartPNG(buildChartDataFull(streetRaw, derPFrKeys), derPFrKeys, [Y_LIMITS.derP.min, Y_LIMITS.derP.max], "W", "Power (W)", "DER Power + Frequency", "der_power_freq", "#0d9488") },
+            { label: "⬇ Q+PF PNG", bg: "bg-fuchsia-600 hover:bg-fuchsia-700", fn: () => exportChartPNG(buildChartDataFull(streetRaw, derQPFKeys), derQPFKeys, [Y_LIMITS.reactive.min, Y_LIMITS.reactive.max], "", "VAR / PF", "DER Reactive Power + PF", "der_reactive_pf", "#7c3aed") },
           ].map(btn => (
             <button key={btn.label} onClick={btn.fn}
               className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold text-white shadow-sm hover:scale-105 transition-all ${btn.bg}`}>
               {btn.label}
             </button>
           ))}
-
           <div className={`w-px h-6 mx-1 hidden sm:block ${isDark ? "bg-white/20" : "bg-slate-300"}`} />
-
-          {/* ── NEW: Time-range export button ── */}
-          <button
-            onClick={() => setShowExportModal(true)}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-violet-600 hover:bg-violet-700 text-white shadow-sm hover:scale-105 transition-all"
-          >
+          <button onClick={() => setShowExportModal(true)}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-violet-600 hover:bg-violet-700 text-white shadow-sm hover:scale-105 transition-all">
             🕐 Export by Time Range
           </button>
-
           <div className={`w-px h-6 mx-1 hidden sm:block ${isDark ? "bg-white/20" : "bg-slate-300"}`} />
-
           <button onClick={() => exportCSV(window.__SMARTGRID_CSV__)}
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-indigo-600 hover:bg-indigo-700 text-white shadow-sm hover:scale-105 transition-all">
             ⬇ CSV Data
@@ -1330,52 +1025,83 @@ export default function Dashboard() {
       <main className="grid grid-cols-1 lg:grid-cols-4 gap-5 items-stretch">
         <section className="lg:col-span-3 space-y-5">
 
+          {/* ── 3-Phase KPI cards ── */}
           <div className={`rounded-2xl p-4 ${sectionBg} border border-white/20 space-y-3`}>
-            <h2 className={`text-xs font-bold uppercase tracking-widest ${h2Color}`}>⚡ 3-Phase Metrics</h2>
+            <h2 className={`text-l   // bigger font-bold uppercase tracking-widest ${h2Color}`}>⚡ 3-Phase Metrics</h2>
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">{voltageCards.map((c, i) => <SmallCard key={i} {...c} />)}</div>
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">{currentCards.map((c, i) => <SmallCard key={i} {...c} />)}</div>
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">{powerCards.map((c, i) => <SmallCard key={i} {...c} />)}</div>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">{reactiveCards.map((c, i) => <SmallCard key={i} {...c} />)}</div>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">{pf3Cards.map((c, i) => <SmallCard key={i} {...c} />)}</div>
           </div>
 
+          {/* ── DER section — 6 cards (added Reactive Power) ── */}
           <div className={`rounded-2xl p-4 ${sectionBg} border border-white/20 space-y-3`}>
-            <h2 className={`text-xs font-bold uppercase tracking-widest ${h2Color}`}>🌿 DER-Integrated Dynamic Phase Reconfiguration Feeder</h2>
-            <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">{streetCards.map((c, i) => <SmallCard key={i} {...c} />)}</div>
+            <h2 className={`text-l   // bigger font-bold uppercase tracking-widest ${h2Color}`}>🌿 DER-Integrated Dynamic Phase Reconfiguration Feeder</h2>
+            {/* FIX: 6 cards now — 3 cols on sm, 6 on lg */}
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">{streetCards.map((c, i) => <SmallCard key={i} {...c} />)}</div>
           </div>
 
-          {/* ── Voltage: 0–300V ── */}
+          {/* ── 3-Phase Graphs ── */}
           <ChartPanel id="chartVoltage" title="Three Phase Voltages"
             titleClass="bg-gradient-to-r from-blue-500 to-purple-500"
             keys={vKeys} filterOptions={vFilterOpts} data={voltageHist}
             yLabel="Voltage (V)" yUnit="V" refVal={230}
             yMin={Y_LIMITS.voltage.min} yMax={Y_LIMITS.voltage.max} isDark={isDark} />
 
-          {/* ── Current: 0–20A ── */}
           <ChartPanel id="chartCurrent" title="Three Phase Currents"
             titleClass="bg-gradient-to-r from-purple-500 to-pink-500"
             keys={iKeys} filterOptions={iFilterOpts} data={currentHist}
             yLabel="Current (A)" yUnit="A" refVal={null}
             yMin={Y_LIMITS.current.min} yMax={Y_LIMITS.current.max} isDark={isDark} />
 
-          {/* ── Power: 0–5000W ── */}
           <ChartPanel id="chartPower" title="Three Phase Powers"
             titleClass="bg-gradient-to-r from-pink-500 to-orange-500"
             keys={pKeys} filterOptions={pFilterOpts} data={powerHist}
             yLabel="Power (W)" yUnit="W" refVal={null}
             yMin={Y_LIMITS.power.min} yMax={Y_LIMITS.power.max} isDark={isDark} />
 
-          {/* ── DER V & I: 48–54 ── */}
-          <ChartPanel id="chartStreet" title="DER (Rooftop) Voltage & Current"
-            titleClass="bg-gradient-to-r from-emerald-500 to-teal-500"
-            keys={stVIKeys} filterOptions={null} data={streetHist}
-            yLabel="V / A" yUnit="" refVal={null}
-            yMin={Y_LIMITS.streetVI.min} yMax={Y_LIMITS.streetVI.max} isDark={isDark} />
+          <ChartPanel id="chartReactive" title="Three Phase Reactive Powers"
+            titleClass="bg-gradient-to-r from-violet-500 to-fuchsia-500"
+            keys={qKeys} filterOptions={qFilterOpts} data={reactiveHist}
+            yLabel="Reactive Power (VAR)" yUnit=" VAR" refVal={null}
+            yMin={Y_LIMITS.reactive.min} yMax={Y_LIMITS.reactive.max} isDark={isDark} />
 
-          {/* ── DER Power / PF / Freq: 0–1 ── */}
-          <ChartPanel id="chartStreetPF" title="DER (Rooftop) Power · PF · Frequency"
+          <ChartPanel id="chartPF3" title="Three Phase Power Factors"
+            titleClass="bg-gradient-to-r from-cyan-500 to-sky-500"
+            keys={pf3Keys} filterOptions={pf3FilterOpts} data={pf3Hist}
+            yLabel="Power Factor" yUnit="" refVal={1}
+            yMin={Y_LIMITS.pf3phase.min} yMax={Y_LIMITS.pf3phase.max} isDark={isDark} />
+
+          {/* ── DER Graphs — FIX: split into 4 separate clear charts ── */}
+
+          {/* DER Voltage: 210–260V — clear continuous line */}
+          <ChartPanel id="chartDerV" title="DER-Integrated Dynamic Phase Reconfiguration Feeder Voltage"
+            titleClass="bg-gradient-to-r from-emerald-500 to-teal-500"
+            keys={derVKeys} filterOptions={null} data={streetHist}
+            yLabel="Voltage (V)" yUnit="V" refVal={null}
+            yMin={Y_LIMITS.derV.min} yMax={Y_LIMITS.derV.max} isDark={isDark} />
+
+          {/* DER Current: 0–10A — its own axis so it doesn't get squashed */}
+          <ChartPanel id="chartDerI" title="DER-Integrated Dynamic Phase Reconfiguration Feeder Current"
             titleClass="bg-gradient-to-r from-teal-500 to-cyan-500"
-            keys={stPFKeys} filterOptions={null} data={streetHist}
-            yLabel="PF" yUnit="" refVal={null}
-            yMin={Y_LIMITS.streetPPF.min} yMax={Y_LIMITS.streetPPF.max} isDark={isDark} />
+            keys={derIKeys} filterOptions={null} data={streetHist}
+            yLabel="Current (A)" yUnit="A" refVal={null}
+            yMin={Y_LIMITS.derI.min} yMax={Y_LIMITS.derI.max} isDark={isDark} />
+
+          {/* FIX: DER Power + Frequency — one chart, Power dominates (0-3000W) */}
+          <ChartPanel id="chartDerPFreq" title="DER-Integrated Dynamic Phase Reconfiguration Feeder Power · Frequency"
+            titleClass="bg-gradient-to-r from-green-500 to-emerald-500"
+            keys={derPFrKeys} filterOptions={null} data={streetHist}
+            yLabel="Power (W) / Freq (Hz)" yUnit="" refVal={null}
+            yMin={Y_LIMITS.derP.min} yMax={Y_LIMITS.derP.max} isDark={isDark} />
+
+          {/* FIX: DER Reactive Power + PF — one chart, Q dominates (0-2500 VAR) */}
+          <ChartPanel id="chartDerQPF" title="DER-Integrated Dynamic Phase Reconfiguration Feeder Reactive Power · Power Factor"
+            titleClass="bg-gradient-to-r from-fuchsia-500 to-purple-500"
+            keys={derQPFKeys} filterOptions={null} data={streetHist}
+            yLabel="VAR / PF" yUnit="" refVal={null}
+            yMin={Y_LIMITS.derQPF.min} yMax={Y_LIMITS.derQPF.max} isDark={isDark} />
 
         </section>
         <aside className="lg:col-span-1 flex flex-col"><EventLog events={events} /></aside>
