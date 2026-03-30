@@ -1,17 +1,4 @@
 // Dashboard.jsx
-// Columns: Timestamp, V_R, V_Y, V_B, I_R, I_Y, I_B, P_R, P_Y, P_B,
-//          Q_R, Q_Y, Q_B, PF_R, PF_Y, PF_B,
-//          Street_V, Street_I, Street_P, Street_PF, Street_F
-//
-// MODIFICATIONS applied:
-//  1. Y-axis updated ranges: V=210-260, I=0-10, P=0-3000, Q=0-2500, PF3=0-1
-//  2. Three Phase Reactive Power cards + chart (Q_R, Q_Y, Q_B) — preserved
-//  3. Three Phase Power Factor cards + chart (PF_R, PF_Y, PF_B) — preserved
-//  4. NEW: DER Reactive Power card added to DER 5-card section
-//  5. FIX: DER V&I split into two charts (Voltage 210-260V | Current 0-10A)
-//  6. FIX: DER last two graphs → Power+Freq (one chart) | ReactPower+PF (one chart)
-//  7. FIX: Graph continuation — null gaps handled, connectNulls corrected
-//  8. FIX: Y-axis ranges on all DER charts corrected for clear visibility
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend,
@@ -30,23 +17,22 @@ const MAX_EVENTS = 15;
 
 /* ========== Y-AXIS LIMITS ========== */
 const Y_LIMITS = {
-  voltage: { min: 210, max: 260 },  // 3-phase voltage
-  current: { min: 0, max: 10 },  // 3-phase current
-  power: { min: 0, max: 3000 },  // 3-phase active power
-  reactive: { min: 0, max: 2500 },  // 3-phase reactive power
-  pf3phase: { min: 0, max: 1 },  // 3-phase power factor
-  // DER (Street) — separate axes for each parameter
-  derV: { min: 210, max: 260 },  // DER voltage (Street_V) — clear range
-  derI: { min: 0, max: 10 },  // DER current (Street_I) — clear range
-  derP: { min: 0, max: 3000 },  // DER power (Street_P)
-  derPF: { min: 0, max: 1 },  // DER power factor (Street_PF)
-  derFreq: { min: 49, max: 51 },  // DER frequency (Street_F) — tight for visibility
-  derPFreq: { min: 0, max: 3000 },  // Power+Freq combined (Power dominates scale)
-  derQPF: { min: 0, max: 2500 },  // ReactPwr+PF combined (Q dominates scale)
+  voltage: { min: 210, max: 260 },
+  current: { min: 0, max: 10 },
+  power: { min: 0, max: 3000 },
+  reactive: { min: 0, max: 2500 },
+  pf3phase: { min: 0, max: 1 },
+  derV: { min: 210, max: 260 },
+  derI: { min: 0, max: 10 },
+  derP: { min: 0, max: 3000 },
+  derPF: { min: 0, max: 1 },
+  derFreq: { min: 49, max: 51 },
+  derPFreq: { min: 0, max: 3000 },
+  derQPF: { min: 0, max: 2500 },
 };
 
 /* =====================================================================
-   LTTB downsampling — unchanged
+   LTTB downsampling
 ===================================================================== */
 function lttbDownsample(data, threshold) {
   const len = data.length;
@@ -88,7 +74,7 @@ const smallNumber = (v, dec = 2) => {
 };
 
 /* =====================================================================
-   30-MINUTE X-AXIS TICK LOGIC — with dynamic tick before 30 min
+   X-AXIS TICK LOGIC
 ===================================================================== */
 const THIRTY_MIN_MS = 30 * 60 * 1000;
 
@@ -101,7 +87,6 @@ function buildDynamicTicks(data) {
   let lastSlot = null;
   data.forEach(({ t }) => {
     if (elapsed < THIRTY_MIN_MS) {
-      // First 30 min: show a tick every ~5 minutes for readability
       const fiveMinSlot = Math.floor(t / (5 * 60 * 1000));
       if (fiveMinSlot !== lastSlot) { tickSet.add(t); lastSlot = fiveMinSlot; }
     } else {
@@ -131,7 +116,7 @@ function filterDataByTime(data, startHHMM, endHHMM) {
 }
 
 /* =====================================================================
-   SMALL KPI CARD — unchanged visual
+   SMALL KPI CARD
 ===================================================================== */
 const SmallCard = React.memo(function SmallCard({ label, value, unit, accent = "blue" }) {
   const emojiMap = {
@@ -142,7 +127,6 @@ const SmallCard = React.memo(function SmallCard({ label, value, unit, accent = "
     "Power Factor R": "🎯", "Power Factor Y": "🎯", "Power Factor B": "🎯",
     "Street Voltage": "🏙️", "Street Current": "🔋",
     "Street Power": "⚙️", "Street PF": "🎛️", "Street Freq": "📡",
-    // NEW DER card
     "DER React. Power": "🔁",
   };
   const gradients = {
@@ -172,7 +156,7 @@ const SmallCard = React.memo(function SmallCard({ label, value, unit, accent = "
 });
 
 /* =====================================================================
-   CUSTOM TOOLTIP — unchanged
+   CUSTOM TOOLTIP
 ===================================================================== */
 const CustomTooltip = ({ active, payload, label }) => {
   if (!active || !payload?.length) return null;
@@ -197,7 +181,7 @@ const CustomTooltip = ({ active, payload, label }) => {
 };
 
 /* =====================================================================
-   TOP-RIGHT LEGEND — unchanged
+   TOP-RIGHT LEGEND
 ===================================================================== */
 const TopRightLegend = ({ keys, isDark }) => {
   const bg = isDark ? "rgba(15,23,42,0.75)" : "rgba(255,255,255,0.88)";
@@ -223,9 +207,7 @@ const TopRightLegend = ({ keys, isDark }) => {
 };
 
 /* =====================================================================
-   GENERIC CHART COMPONENT
-   FIX: connectNulls=false + proper null handling for continuous lines
-   All zoom/pan/brush features preserved unchanged
+   GENERIC SINGLE-AXIS CHART
 ===================================================================== */
 const Charts = React.memo(function Charts({
   keys, data, yLabel, yUnit, refVal, filter = "all", yMin = 0, yMax = 300, isDark
@@ -279,10 +261,6 @@ const Charts = React.memo(function Charts({
   }, [clampDomain]);
   const handleMouseUp = useCallback(() => { dragRef.current.active = false; }, []);
 
-  /* ── Build chartData
-     FIX: Values outside Y range become null (not dropped) so Recharts
-     draws a gap rather than a wild spike, and connectNulls=false keeps
-     the line continuous inside-range while breaking at true null gaps. ── */
   const { chartData, tickTimestamps } = useMemo(() => {
     const cd = data.map(d => {
       const point = {
@@ -293,10 +271,8 @@ const Charts = React.memo(function Charts({
       };
       keys.forEach(k => {
         const raw = d[k.dataKey];
-        // Keep value if in-range; otherwise null (renders as gap, not spike)
         point[k.dataKey] = (raw !== null && raw !== undefined && !isNaN(raw) && raw >= yMin && raw <= yMax)
-          ? raw
-          : null;
+          ? raw : null;
       });
       return point;
     });
@@ -317,84 +293,160 @@ const Charts = React.memo(function Charts({
   const xTickFormatter = useCallback((value, index) => {
     const point = chartData[index];
     if (!point) return "";
-    if (tickTimestamps.has(point._ts)) return formatTickTime(point._ts);
+
+    // ❌ skip first 1–2 labels to avoid overlap
+    if (index < 2) return "";
+
+    if (tickTimestamps.has(point._ts)) {
+      return formatTickTime(point._ts);
+    }
     return "";
   }, [chartData, tickTimestamps]);
 
   return (
     <div style={{ position: "relative" }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4, flexWrap: "wrap" }}>
-        <span style={{ fontSize: 10, color: hintColor }}>
-          🖱 Scroll to zoom Y · Shift+drag to pan
-        </span>
+        <span style={{ fontSize: 10, color: hintColor }}>🖱 Scroll to zoom Y · Shift+drag to pan</span>
         {isZoomed && (
           <>
-            <span style={{
-              fontSize: 10, fontWeight: 700, color: "#6366f1",
-              background: "rgba(99,102,241,0.12)", borderRadius: 6, padding: "2px 8px"
-            }}>
+            <span style={{ fontSize: 10, fontWeight: 700, color: "#6366f1", background: "rgba(99,102,241,0.12)", borderRadius: 6, padding: "2px 8px" }}>
               Y: {zoomDomain[0].toFixed(2)}{yUnit} – {zoomDomain[1].toFixed(2)}{yUnit}
             </span>
-            <button onClick={() => setZoomDomain(null)} style={{
-              fontSize: 10, cursor: "pointer",
-              background: "rgba(239,68,68,0.15)", color: "#f87171",
-              border: "1px solid rgba(239,68,68,0.3)",
-              borderRadius: 6, padding: "2px 8px", fontWeight: 600
-            }}>Reset Zoom</button>
+            <button onClick={() => setZoomDomain(null)} style={{ fontSize: 10, cursor: "pointer", background: "rgba(239,68,68,0.15)", color: "#f87171", border: "1px solid rgba(239,68,68,0.3)", borderRadius: 6, padding: "2px 8px", fontWeight: 600 }}>Reset Zoom</button>
           </>
         )}
       </div>
-
-      <div
-        onWheel={handleWheel} onMouseDown={handleMouseDown}
-        onMouseMove={handleMouseMove} onMouseUp={handleMouseUp} onMouseLeave={handleMouseUp}
-        style={{ cursor: isZoomed ? "zoom-in" : "crosshair", userSelect: "none" }}
-      >
+      <div onWheel={handleWheel} onMouseDown={handleMouseDown} onMouseMove={handleMouseMove}
+        onMouseUp={handleMouseUp} onMouseLeave={handleMouseUp}
+        style={{ cursor: isZoomed ? "zoom-in" : "crosshair", userSelect: "none" }}>
         <ResponsiveContainer width="100%" height={240}>
           <LineChart data={chartData} margin={{ top: 6, right: 18, bottom: 4, left: 10 }}>
             <CartesianGrid strokeDasharray="3 3" stroke={gridColor} opacity={0.22} />
-            <XAxis
-              dataKey="time" stroke={axisColor}
-              tick={{ fontSize: 10, fill: tickColor }}
-              tickFormatter={xTickFormatter} minTickGap={1} interval={0} tickLine={false}
-            />
-            <YAxis
-              stroke={axisColor} domain={yDomain} allowDataOverflow={false}
+            <XAxis dataKey="time" stroke={axisColor} tick={{ fontSize: 10, fill: tickColor }}
+              tickFormatter={xTickFormatter} minTickGap={1} interval={0} tickLine={false} />
+            <YAxis stroke={axisColor} domain={yDomain} allowDataOverflow={false}
               tickFormatter={yTickFmt} tick={{ fontSize: 10, fill: tickColor }}
               tickCount={6} tickLine={false} width={68}
-              label={{ value: yLabel, angle: -90, position: "insideLeft", fill: axisColor, fontSize: 10, dy: 50 }}
-            />
+              label={{ value: yLabel, angle: -90, position: "insideLeft", fill: axisColor, fontSize: 10, dy: 50 }} />
             <Tooltip content={<CustomTooltip />} />
             <Legend wrapperStyle={{ display: "none" }} />
             {refVal !== null && refVal !== undefined && (
-              <ReferenceLine
-                y={refVal} stroke="#22c55e" strokeDasharray="6 3" strokeWidth={1.5}
-                label={{ value: `${refVal}${yUnit} nominal`, position: "insideTopRight", fontSize: 9, fill: "#22c55e" }}
-              />
+              <ReferenceLine y={refVal} stroke="#22c55e" strokeDasharray="6 3" strokeWidth={1.5}
+                label={{ value: `${refVal}${yUnit} nominal`, position: "insideTopRight", fontSize: 9, fill: "#22c55e" }} />
             )}
             {keys.map(k => (
-              <Line
-                key={k.dataKey} type="monotone" dataKey={k.dataKey}
+              <Line key={k.dataKey} type="monotone" dataKey={k.dataKey}
                 stroke={k.color} strokeWidth={2.5} dot={false} name={k.name}
-                strokeOpacity={opacityFor(k.dataKey)}
-                connectNulls={false}   /* FIX: false = show gaps, not wild lines */
-                isAnimationActive={false}
-              />
+                strokeOpacity={opacityFor(k.dataKey)} connectNulls={false} isAnimationActive={false} />
             ))}
             <Brush dataKey="time" height={20} stroke="#6366f1" fill="rgba(99,102,241,0.08)" travellerWidth={8} />
           </LineChart>
         </ResponsiveContainer>
       </div>
-      <div style={{
-        textAlign: "right", paddingRight: 18, marginTop: 2,
-        fontSize: 10, color: axisColor, userSelect: "none", pointerEvents: "none",
-      }}>Time →</div>
+      <div style={{ textAlign: "right", paddingRight: 18, marginTop: 2, fontSize: 10, color: axisColor, userSelect: "none", pointerEvents: "none" }}>Time →</div>
     </div>
   );
 });
 
 /* =====================================================================
-   CHART PANEL — unchanged UI
+   DUAL-AXIS CHART  ← TOP-LEVEL component (fix: was wrongly nested inside Charts)
+===================================================================== */
+const DualAxisChart = React.memo(function DualAxisChart({
+  leftKeys, rightKeys, data,
+  leftLabel, rightLabel,
+  leftMin, leftMax, leftUnit,
+  rightMin, rightMax, rightUnit,
+  isDark
+}) {
+  const { chartData, tickTimestamps } = useMemo(() => {
+    const cd = data.map(d => {
+      const point = {
+        _ts: d.t,
+        time: new Date(d.t).toLocaleTimeString("en-IN", {
+          hour: "2-digit", minute: "2-digit", second: "2-digit"
+        }),
+      };
+      leftKeys.forEach(k => {
+        const raw = d[k.dataKey];
+        point[k.dataKey] = (raw !== null && raw !== undefined && !isNaN(raw) && raw >= leftMin && raw <= leftMax) ? raw : null;
+      });
+      rightKeys.forEach(k => {
+        const raw = d[k.dataKey];
+        point[k.dataKey] = (raw !== null && raw !== undefined && !isNaN(raw) && raw >= rightMin && raw <= rightMax) ? raw : null;
+      });
+      return point;
+    });
+    const tts = buildDynamicTicks(data);
+    return { chartData: cd, tickTimestamps: tts };
+  }, [data, leftKeys, rightKeys, leftMin, leftMax, rightMin, rightMax]);
+
+  const axisColor = isDark ? "#64748b" : "#94a3b8";
+  const tickColor = isDark ? "#94a3b8" : "#64748b";
+  const gridColor = isDark ? "#94a3b8" : "#cbd5e1";
+  const hintColor = isDark ? "#64748b" : "#94a3b8";
+
+  const xTickFormatter = useCallback((value, index) => {
+    const point = chartData[index];
+    if (!point) return "";
+    if (tickTimestamps.has(point._ts)) return formatTickTime(point._ts);
+    return "";
+  }, [chartData, tickTimestamps]);
+
+  return (
+    <div style={{ position: "relative" }}>
+      <div style={{ marginBottom: 4 }}>
+        <span style={{ fontSize: 10, color: hintColor }}>🖱 Scroll to zoom Y · Shift+drag to pan</span>
+      </div>
+      <ResponsiveContainer width="100%" height={240}>
+        <LineChart data={chartData} margin={{ top: 6, right: 68, bottom: 4, left: 10 }}>
+          <CartesianGrid strokeDasharray="3 3" stroke={gridColor} opacity={0.22} />
+          <XAxis
+            dataKey="time"
+            stroke={axisColor}
+            tick={{ fontSize: 10, fill: tickColor }}
+            tickFormatter={xTickFormatter}
+            minTickGap={40}
+            interval="preserveStartEnd"
+            tickLine={false}
+          />
+
+          {/* LEFT Y-AXIS */}
+          <YAxis yAxisId="left" orientation="left" stroke={axisColor}
+            domain={[leftMin, leftMax]}
+            tickFormatter={v => `${Number(v).toFixed(2)}${leftUnit}`}
+            tick={{ fontSize: 10, fill: tickColor }} tickCount={6} tickLine={false} width={68}
+            label={{ value: leftLabel, angle: -90, position: "insideLeft", fill: axisColor, fontSize: 10, dy: 50 }} />
+
+          {/* RIGHT Y-AXIS */}
+          <YAxis yAxisId="right" orientation="right" stroke={axisColor}
+            domain={[rightMin, rightMax]}
+            tickFormatter={v => `${Number(v).toFixed(3)}${rightUnit}`}
+            tick={{ fontSize: 10, fill: tickColor }} tickCount={6} tickLine={false} width={68}
+            label={{ value: rightLabel, angle: 90, position: "insideRight", fill: axisColor, fontSize: 10, dy: -40 }} />
+
+          <Tooltip content={<CustomTooltip />} />
+          <Legend wrapperStyle={{ display: "none" }} />
+
+          {leftKeys.map(k => (
+            <Line key={k.dataKey} yAxisId="left" type="monotone" dataKey={k.dataKey}
+              stroke={k.color} strokeWidth={2.5} dot={false} name={k.name}
+              connectNulls={false} isAnimationActive={false} />
+          ))}
+          {rightKeys.map(k => (
+            <Line key={k.dataKey} yAxisId="right" type="monotone" dataKey={k.dataKey}
+              stroke={k.color} strokeWidth={2.5} dot={false} name={k.name}
+              connectNulls={false} isAnimationActive={false} />
+          ))}
+          <Brush dataKey="time" height={20} stroke="#6366f1" fill="rgba(99,102,241,0.08)" travellerWidth={8} />
+        </LineChart>
+      </ResponsiveContainer>
+      <div style={{ textAlign: "right", paddingRight: 18, marginTop: 2, fontSize: 10, color: axisColor, userSelect: "none", pointerEvents: "none" }}>Time →</div>
+    </div>
+  );
+});
+
+/* =====================================================================
+   CHART PANEL (single axis)
 ===================================================================== */
 function ChartPanel({ id, title, titleClass, keys, filterOptions, data, yLabel, yUnit, refVal, yMin = 0, yMax, isDark }) {
   const [filter, setFilter] = useState("all");
@@ -404,9 +456,7 @@ function ChartPanel({ id, title, titleClass, keys, filterOptions, data, yLabel, 
   return (
     <div id={id} className={`rounded-2xl p-4 border border-white/20 shadow-xl backdrop-blur-xl ${isDark ? "bg-white/10" : "bg-white/70"}`}>
       <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 8, gap: 8 }}>
-        <h3 className={`text-lg font-bold bg-clip-text text-transparent ${titleClass}`} style={{ flexShrink: 0 }}>
-          {title}
-        </h3>
+        <h3 className={`text-lg font-bold bg-clip-text text-transparent ${titleClass}`} style={{ flexShrink: 0 }}>{title}</h3>
         <div style={{ display: "flex", alignItems: "flex-start", gap: 8, flexShrink: 0 }}>
           {filterOptions && (
             <select value={filter} onChange={(e) => setFilter(e.target.value)} className={selectCls}>
@@ -416,16 +466,36 @@ function ChartPanel({ id, title, titleClass, keys, filterOptions, data, yLabel, 
           <TopRightLegend keys={keys} isDark={isDark} />
         </div>
       </div>
-      <Charts
-        keys={keys} data={data} yLabel={yLabel} yUnit={yUnit}
-        refVal={refVal} filter={filter} yMin={yMin} yMax={yMax} isDark={isDark}
-      />
+      <Charts keys={keys} data={data} yLabel={yLabel} yUnit={yUnit}
+        refVal={refVal} filter={filter} yMin={yMin} yMax={yMax} isDark={isDark} />
     </div>
   );
 }
 
 /* =====================================================================
-   TIME-RANGE EXPORT MODAL — unchanged, updated chart list
+   DUAL-AXIS CHART PANEL
+===================================================================== */
+function DualAxisChartPanel({ id, title, titleClass, leftKeys, rightKeys, data,
+  leftLabel, rightLabel, leftMin, leftMax, leftUnit, rightMin, rightMax, rightUnit, isDark }) {
+  const allKeys = [...leftKeys, ...rightKeys];
+  return (
+    <div id={id} className={`rounded-2xl p-4 border border-white/20 shadow-xl backdrop-blur-xl ${isDark ? "bg-white/10" : "bg-white/70"}`}>
+      <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 8, gap: 8 }}>
+        <h3 className={`text-lg font-bold bg-clip-text text-transparent ${titleClass}`} style={{ flexShrink: 0 }}>{title}</h3>
+        <TopRightLegend keys={allKeys} isDark={isDark} />
+      </div>
+      <DualAxisChart
+        leftKeys={leftKeys} rightKeys={rightKeys} data={data}
+        leftLabel={leftLabel} rightLabel={rightLabel}
+        leftMin={leftMin} leftMax={leftMax} leftUnit={leftUnit}
+        rightMin={rightMin} rightMax={rightMax} rightUnit={rightUnit}
+        isDark={isDark} />
+    </div>
+  );
+}
+
+/* =====================================================================
+   TIME-RANGE EXPORT MODAL
 ===================================================================== */
 function TimeRangeExportModal({ isOpen, onClose, onExport, isDark, rawRef }) {
   const sessionRange = useMemo(() => {
@@ -530,7 +600,7 @@ function TimeRangeExportModal({ isOpen, onClose, onExport, isDark, rawRef }) {
 }
 
 /* =====================================================================
-   PNG EXPORT — unchanged canvas logic
+   PNG EXPORT
 ===================================================================== */
 const exportChartPNG = (chartData, keys, yDomain, yUnit, yLabel, title, filename, accentColor) => {
   const W = 1000, H = 460;
@@ -543,7 +613,6 @@ const exportChartPNG = (chartData, keys, yDomain, yUnit, yLabel, title, filename
   ctx.scale(2, 2);
   ctx.fillStyle = "#ffffff"; ctx.fillRect(0, 0, W, H);
 
-  // Legend box
   const LEGEND_ROW_H = 18, LEGEND_PAD_X = 10, LEGEND_PAD_Y = 7;
   const SWATCH_W = 20, SWATCH_GAP = 6, LEGEND_FONT = 10, LEGEND_MARGIN = 12;
   ctx.font = `600 ${LEGEND_FONT}px system-ui, sans-serif`;
@@ -570,21 +639,13 @@ const exportChartPNG = (chartData, keys, yDomain, yUnit, yLabel, title, filename
     ctx.fillText(k.name, bx + LEGEND_PAD_X + SWATCH_W + SWATCH_GAP, lineY + 3);
   });
   ctx.setLineDash([]); ctx.lineCap = "butt";
-
-  // Title
   ctx.font = "bold 15px system-ui, sans-serif"; ctx.fillStyle = accentColor; ctx.textAlign = "left";
   ctx.fillText(title, margin.left, 32);
-
-  // Y label
   ctx.save(); ctx.translate(16, margin.top + plotH / 2); ctx.rotate(-Math.PI / 2);
   ctx.font = "11px system-ui, sans-serif"; ctx.fillStyle = "#64748b"; ctx.textAlign = "center";
   ctx.fillText(yLabel, 0, 0); ctx.restore();
-
-  // X label
   ctx.font = "11px system-ui, sans-serif"; ctx.fillStyle = "#64748b"; ctx.textAlign = "right";
   ctx.fillText("Time →", margin.left + plotW, H - 10);
-
-  // Y scale
   const [yMin, yMax2] = Array.isArray(yDomain) ? yDomain : [0, 100];
   const yRange = (yMax2 - yMin) || 1;
   const toY = v => margin.top + plotH - ((v - yMin) / yRange) * plotH;
@@ -597,25 +658,16 @@ const exportChartPNG = (chartData, keys, yDomain, yUnit, yLabel, title, filename
     ctx.font = "10px system-ui, sans-serif"; ctx.fillStyle = "#94a3b8"; ctx.textAlign = "right";
     ctx.fillText(`${val.toFixed(2)}${yUnit}`, margin.left - 6, y + 4);
   }
-
-  // X tick labels (evenly spaced)
   if (chartData.length > 1) {
     const step = Math.max(1, Math.floor(chartData.length / 10));
     ctx.font = "10px system-ui, sans-serif"; ctx.fillStyle = "#94a3b8"; ctx.textAlign = "center";
     for (let i = 0; i < chartData.length; i += step) {
       const x = margin.left + (i / (chartData.length - 1)) * plotW;
-      ctx.fillText(
-        new Date(chartData[i]._ts).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", hour12: true }),
-        x, margin.top + plotH + 18
-      );
+      ctx.fillText(new Date(chartData[i]._ts).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", hour12: true }), x, margin.top + plotH + 18);
     }
   }
-
-  // Axis lines
   ctx.strokeStyle = "#94a3b8"; ctx.lineWidth = 1.5; ctx.setLineDash([]);
   ctx.beginPath(); ctx.moveTo(margin.left, margin.top); ctx.lineTo(margin.left, margin.top + plotH); ctx.lineTo(margin.left + plotW, margin.top + plotH); ctx.stroke();
-
-  // Data lines
   if (chartData.length > 1) {
     keys.forEach(k => {
       ctx.strokeStyle = k.color; ctx.lineWidth = 2.2; ctx.setLineDash([]);
@@ -657,6 +709,170 @@ const exportCSV = (csvText) => {
   saveAs(new Blob([csvText], { type: "text/csv;charset=utf-8" }), `smartgrid_data_${Date.now()}.csv`);
 };
 
+
+/* =====================================================================
+   DUAL-AXIS PNG EXPORT
+===================================================================== */
+const exportDualAxisChartPNG = (chartData, leftKeys, rightKeys, leftDomain, rightDomain, leftUnit, rightUnit, leftLabel, rightLabel, title, filename, accentColor) => {
+  const W = 1000, H = 460;
+  const margin = { top: 56, right: 84, bottom: 60, left: 84 };
+  const plotW = W - margin.left - margin.right;
+  const plotH = H - margin.top - margin.bottom;
+  const canvas = document.createElement("canvas");
+  canvas.width = W * 2; canvas.height = H * 2;
+  const ctx = canvas.getContext("2d");
+  ctx.scale(2, 2);
+  ctx.fillStyle = "#ffffff"; ctx.fillRect(0, 0, W, H);
+
+  const allKeys = [...leftKeys, ...rightKeys];
+
+  // ── Legend box (top-right) ──
+  const LEGEND_ROW_H = 18, LEGEND_PAD_X = 10, LEGEND_PAD_Y = 7;
+  const SWATCH_W = 20, SWATCH_GAP = 6, LEGEND_FONT = 10, LEGEND_MARGIN = 12;
+  ctx.font = `600 ${LEGEND_FONT}px system-ui, sans-serif`;
+  const maxTextW = Math.max(...allKeys.map(k => ctx.measureText(k.name).width));
+  const boxW = LEGEND_PAD_X * 2 + SWATCH_W + SWATCH_GAP + maxTextW + 2;
+  const boxH = LEGEND_PAD_Y * 2 + allKeys.length * LEGEND_ROW_H - (LEGEND_ROW_H - 14);
+  const bx = W - LEGEND_MARGIN - boxW - 10, by = LEGEND_MARGIN;
+  ctx.shadowColor = "rgba(0,0,0,0.10)"; ctx.shadowBlur = 6;
+  ctx.fillStyle = "#ffffff"; ctx.strokeStyle = "#e2e8f0"; ctx.lineWidth = 1;
+  const R = 5;
+  ctx.beginPath();
+  ctx.moveTo(bx + R, by); ctx.lineTo(bx + boxW - R, by); ctx.quadraticCurveTo(bx + boxW, by, bx + boxW, by + R);
+  ctx.lineTo(bx + boxW, by + boxH - R); ctx.quadraticCurveTo(bx + boxW, by + boxH, bx + boxW - R, by + boxH);
+  ctx.lineTo(bx + R, by + boxH); ctx.quadraticCurveTo(bx, by + boxH, bx, by + boxH - R);
+  ctx.lineTo(bx, by + R); ctx.quadraticCurveTo(bx, by, bx + R, by);
+  ctx.closePath(); ctx.fill();
+  ctx.shadowColor = "transparent"; ctx.shadowBlur = 0; ctx.stroke();
+  allKeys.forEach((k, idx) => {
+    const rowY = by + LEGEND_PAD_Y + idx * LEGEND_ROW_H;
+    const lineY = rowY + 7;
+    ctx.strokeStyle = k.color; ctx.lineWidth = 2.5; ctx.lineCap = "round"; ctx.setLineDash([]);
+    ctx.beginPath(); ctx.moveTo(bx + LEGEND_PAD_X, lineY); ctx.lineTo(bx + LEGEND_PAD_X + SWATCH_W, lineY); ctx.stroke();
+    ctx.font = `600 ${LEGEND_FONT}px system-ui, sans-serif`; ctx.fillStyle = "#1e293b"; ctx.textAlign = "left";
+    ctx.fillText(k.name, bx + LEGEND_PAD_X + SWATCH_W + SWATCH_GAP, lineY + 3);
+  });
+
+  ctx.setLineDash([]); ctx.lineCap = "butt";
+
+  // ── Title ──
+  ctx.font = "bold 15px system-ui, sans-serif"; ctx.fillStyle = accentColor; ctx.textAlign = "left";
+  ctx.fillText(title, margin.left, 32);
+
+  // ── Left Y-axis label ──
+  ctx.save(); ctx.translate(16, margin.top + plotH / 2); ctx.rotate(-Math.PI / 2);
+  ctx.font = "11px system-ui, sans-serif"; ctx.fillStyle = "#64748b"; ctx.textAlign = "center";
+  ctx.fillText(leftLabel, 0, 0); ctx.restore();
+
+  // ── Right Y-axis label ──
+  ctx.save(); ctx.translate(W - 16, margin.top + plotH / 2); ctx.rotate(Math.PI / 2);
+  ctx.font = "11px system-ui, sans-serif"; ctx.fillStyle = "#64748b"; ctx.textAlign = "center";
+  ctx.fillText(rightLabel, 0, 0); ctx.restore();
+
+  // ── X-axis label ──
+  ctx.font = "11px system-ui, sans-serif"; ctx.fillStyle = "#64748b"; ctx.textAlign = "right";
+  ctx.fillText("Time →", margin.left + plotW, H - 10);
+
+  // ── Grid + Left Y ticks ──
+  const [lyMin, lyMax] = leftDomain;
+  const lyRange = (lyMax - lyMin) || 1;
+  const toYLeft = v => margin.top + plotH - ((v - lyMin) / lyRange) * plotH;
+
+  for (let i = 0; i <= 5; i++) {
+    const val = lyMin + (lyRange * i) / 5;
+    const y = toYLeft(val);
+    ctx.strokeStyle = "#e2e8f0"; ctx.lineWidth = 1; ctx.setLineDash([4, 3]);
+    ctx.beginPath(); ctx.moveTo(margin.left, y); ctx.lineTo(margin.left + plotW, y); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.font = "10px system-ui, sans-serif"; ctx.fillStyle = "#94a3b8"; ctx.textAlign = "right";
+    ctx.fillText(`${val.toFixed(2)}${leftUnit}`, margin.left - 6, y + 4);
+  }
+
+  // ── Right Y ticks ──
+  const [ryMin, ryMax] = rightDomain;
+  const ryRange = (ryMax - ryMin) || 1;
+  const toYRight = v => margin.top + plotH - ((v - ryMin) / ryRange) * plotH;
+
+  for (let i = 0; i <= 5; i++) {
+    const val = ryMin + (ryRange * i) / 5;
+    const y = toYRight(val);
+    ctx.font = "10px system-ui, sans-serif"; ctx.fillStyle = "#94a3b8"; ctx.textAlign = "left";
+    ctx.fillText(`${val.toFixed(3)}${rightUnit}`, margin.left + plotW + 6, y + 4);
+  }
+
+  // ── X ticks ──
+  if (chartData.length > 1) {
+    const step = Math.max(1, Math.floor(chartData.length / 10));
+    ctx.font = "10px system-ui, sans-serif"; ctx.fillStyle = "#94a3b8"; ctx.textAlign = "center";
+    for (let i = 0; i < chartData.length; i += step) {
+      const x = margin.left + (i / (chartData.length - 1)) * plotW;
+      ctx.fillText(new Date(chartData[i]._ts).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", hour12: true }), x, margin.top + plotH + 18);
+    }
+  }
+
+  // ── Axes border ──
+  ctx.strokeStyle = "#94a3b8"; ctx.lineWidth = 1.5; ctx.setLineDash([]);
+  ctx.beginPath();
+  ctx.moveTo(margin.left, margin.top); ctx.lineTo(margin.left, margin.top + plotH);
+  ctx.lineTo(margin.left + plotW, margin.top + plotH);
+  ctx.lineTo(margin.left + plotW, margin.top);
+  ctx.stroke();
+
+  // ── Draw LEFT key lines ──
+  if (chartData.length > 1) {
+    leftKeys.forEach(k => {
+      ctx.strokeStyle = k.color; ctx.lineWidth = 2.2; ctx.setLineDash([]);
+      ctx.beginPath();
+      let started = false;
+      chartData.forEach((d, i) => {
+        const v = d[k.dataKey];
+        if (v === null || v === undefined || isNaN(v)) { started = false; return; }
+        const x = margin.left + (i / (chartData.length - 1)) * plotW;
+        const y = toYLeft(v);
+        if (!started) { ctx.moveTo(x, y); started = true; } else ctx.lineTo(x, y);
+      });
+      ctx.stroke();
+    });
+
+    // ── Draw RIGHT key lines ──
+    rightKeys.forEach(k => {
+      ctx.strokeStyle = k.color; ctx.lineWidth = 2.2; ctx.setLineDash([]);
+      ctx.beginPath();
+      let started = false;
+      chartData.forEach((d, i) => {
+        const v = d[k.dataKey];
+        if (v === null || v === undefined || isNaN(v)) { started = false; return; }
+        const x = margin.left + (i / (chartData.length - 1)) * plotW;
+        const y = toYRight(v);
+        if (!started) { ctx.moveTo(x, y); started = true; } else ctx.lineTo(x, y);
+      });
+      ctx.stroke();
+    });
+  }
+
+  ctx.setLineDash([]); ctx.lineCap = "butt";
+  canvas.toBlob(blob => saveAs(blob, `${filename}_${Date.now()}.png`));
+};
+
+function exportDualAxisChartPNGByRange(hist, leftKeys, rightKeys, leftDomain, rightDomain, leftUnit, rightUnit, leftLabel, rightLabel, title, filename, accentColor, startTime, endTime) {
+  if (!hist || hist.length === 0) return "No data recorded yet.";
+  if (!startTime || !endTime) return "Please select both times.";
+  const sliced = filterDataByTime(hist, startTime, endTime);
+  if (sliced.length < 2) {
+    const fmtAvail = (ms) => new Date(ms).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", hour12: true });
+    return `No data between ${startTime} and ${endTime}. Available: ${fmtAvail(hist[0].t)} → ${fmtAvail(hist[hist.length - 1].t)}.`;
+  }
+  const allKeys = [...leftKeys, ...rightKeys];
+  const chartData = sliced.map(d => {
+    const point = { _ts: d.t, time: new Date(d.t).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", second: "2-digit" }) };
+    allKeys.forEach(k => { point[k.dataKey] = d[k.dataKey] ?? null; });
+    return point;
+  });
+  exportDualAxisChartPNG(chartData, leftKeys, rightKeys, leftDomain, rightDomain, leftUnit, rightUnit, leftLabel, rightLabel, title, filename, accentColor);
+  return null;
+}
+
+
 /* =====================================================================
    MAIN DASHBOARD
 ===================================================================== */
@@ -679,15 +895,13 @@ export default function Dashboard() {
   };
   const [data, setData] = useState(emptyData);
 
-  // History refs (unlimited, ref-based)
   const voltageRaw = useRef([]);
   const currentRaw = useRef([]);
   const powerRaw = useRef([]);
   const reactiveRaw = useRef([]);
   const pf3Raw = useRef([]);
-  const streetRaw = useRef([]);   // holds St_V, St_I, St_P, St_Q, St_PF, St_F
+  const streetRaw = useRef([]);
 
-  // Downsampled render state
   const [voltageHist, setVoltageHist] = useState([]);
   const [currentHist, setCurrentHist] = useState([]);
   const [powerHist, setPowerHist] = useState([]);
@@ -703,7 +917,6 @@ export default function Dashboard() {
     localStorage.setItem("theme", theme);
   }, [theme, isDark]);
 
-  /* ── Gate helper: value inside [lo,hi] or null ── */
   const gate = (v, lo, hi) => { const n = Number(v); return (!isNaN(n) && n >= lo && n <= hi) ? n : null; };
 
   const fetchData = useCallback(async () => {
@@ -720,9 +933,6 @@ export default function Dashboard() {
       if (prevRawRef.current === rawId) { setLoading(false); return; }
       prevRawRef.current = rawId;
 
-      /* NOTE: Add Q_R, Q_Y, Q_B, PF_R, PF_Y, PF_B, Street_Q columns to your
-         Google Sheet to populate reactive power and 3-phase PF charts.
-         Until those columns exist the charts will show 0 (no values in range). */
       const newData = {
         Va: gate(row["V_R"], Y_LIMITS.voltage.min, Y_LIMITS.voltage.max),
         Vb: gate(row["V_Y"], Y_LIMITS.voltage.min, Y_LIMITS.voltage.max),
@@ -739,14 +949,13 @@ export default function Dashboard() {
         PFa: gate(row["PF_R"], Y_LIMITS.pf3phase.min, Y_LIMITS.pf3phase.max),
         PFb: gate(row["PF_Y"], Y_LIMITS.pf3phase.min, Y_LIMITS.pf3phase.max),
         PFc: gate(row["PF_B"], Y_LIMITS.pf3phase.min, Y_LIMITS.pf3phase.max),
-        // DER / Street — each has its own correct range
         St_V: gate(row["Street_V"], Y_LIMITS.derV.min, Y_LIMITS.derV.max),
         St_I: gate(row["Street_I"], Y_LIMITS.derI.min, Y_LIMITS.derI.max),
         St_P: gate(row["Street_P"], Y_LIMITS.derP.min, Y_LIMITS.derP.max),
         St_Q: gate(row["Q_S"], Y_LIMITS.reactive.min, Y_LIMITS.reactive.max),
         St_PF: gate(row["Street_PF"], Y_LIMITS.derPF.min, Y_LIMITS.derPF.max),
         St_F: gate(row["Street_F"], Y_LIMITS.derFreq.min, Y_LIMITS.derFreq.max),
-        Timestamp: new Date().toLocaleString('en-GB')
+        Timestamp: new Date().toISOString().replace('T', ' ').slice(0, 19)
       };
 
       const prev = prevDataRef.current;
@@ -780,7 +989,6 @@ export default function Dashboard() {
     } catch { setStatus("Disconnected"); setLoading(false); }
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  /* ── Historical backfill ── */
   const backfilledRef = useRef(false);
   const backfillHistory = useCallback(async () => {
     if (backfilledRef.current) return;
@@ -848,7 +1056,7 @@ export default function Dashboard() {
 
       const last = vArr[vArr.length - 1], lastI = iArr[iArr.length - 1], lastP = pArr[pArr.length - 1];
       const lastQ = qArr[qArr.length - 1], lastPF = pfArr[pfArr.length - 1], lastS = sArr[sArr.length - 1];
-      setData({ Va: last.Va, Vb: last.Vb, Vc: last.Vc, Ia: lastI.Ia, Ib: lastI.Ib, Ic: lastI.Ic, Pa: lastP.Pa, Pb: lastP.Pb, Pc: lastP.Pc, Qa: lastQ.Qa, Qb: lastQ.Qb, Qc: lastQ.Qc, PFa: lastPF.PFa, PFb: lastPF.PFb, PFc: lastPF.PFc, St_V: lastS.St_V, St_I: lastS.St_I, St_P: lastS.St_P, St_Q: lastS.St_Q, St_PF: lastS.St_PF, St_F: lastS.St_F, Timestamp: new Date(last.t).toLocaleTimeString() });
+      setData({ Va: last.Va, Vb: last.Vb, Vc: last.Vc, Ia: lastI.Ia, Ib: lastI.Ib, Ic: lastI.Ic, Pa: lastP.Pa, Pb: lastP.Pb, Pc: lastP.Pc, Qa: lastQ.Qa, Qb: lastQ.Qb, Qc: lastQ.Qc, PFa: lastPF.PFa, PFb: lastPF.PFb, PFc: lastPF.PFc, St_V: lastS.St_V, St_I: lastS.St_I, St_P: lastS.St_P, St_Q: lastS.St_Q, St_PF: lastS.St_PF, St_F: lastS.St_F, Timestamp: new Date(last.t).toISOString().replace('T', ' ').slice(0, 19) });
       setStatus("Connected");
       setEvents(p => [{ msg: `Backfilled ${vArr.length} rows from today`, time: Date.now(), level: "success" }, ...p].slice(0, MAX_EVENTS));
       setLoading(false);
@@ -887,12 +1095,11 @@ export default function Dashboard() {
     { label: "Power Factor Y", value: smallNumber(data.PFb, 3), unit: "PF", accent: "cyan" },
     { label: "Power Factor B", value: smallNumber(data.PFc, 3), unit: "PF", accent: "cyan" },
   ];
-  // DER section — 6 cards now (added Reactive Power)
   const streetCards = [
     { label: "Voltage", value: smallNumber(data.St_V, 1), unit: "V", accent: "green" },
     { label: "Current", value: smallNumber(data.St_I, 3), unit: "A", accent: "green" },
     { label: "Power", value: smallNumber(data.St_P, 1), unit: "W", accent: "green" },
-    { label: "Reactive Power", value: smallNumber(data.St_Q, 1), unit: "VAR", accent: "violet" }, // NEW
+    { label: "Reactive Power", value: smallNumber(data.St_Q, 1), unit: "VAR", accent: "violet" },
     { label: "Power factor", value: smallNumber(data.St_PF, 2), unit: "PF", accent: "blue" },
     { label: "Frequency", value: smallNumber(data.St_F, 2), unit: "Hz", accent: "orange" },
   ];
@@ -903,12 +1110,9 @@ export default function Dashboard() {
   const pKeys = [{ dataKey: "Pa", name: "P_R", color: "#ec4899" }, { dataKey: "Pb", name: "P_Y", color: "#8b5cf6" }, { dataKey: "Pc", name: "P_B", color: "#f59e0b" }];
   const qKeys = [{ dataKey: "Qa", name: "Q_R", color: "#a855f7" }, { dataKey: "Qb", name: "Q_Y", color: "#d946ef" }, { dataKey: "Qc", name: "Q_B", color: "#f59e0b" }];
   const pf3Keys = [{ dataKey: "PFa", name: "PF_R", color: "#06b6d4" }, { dataKey: "PFb", name: "PF_Y", color: "#10b981" }, { dataKey: "PFc", name: "PF_B", color: "#f59e0b" }];
-  // DER split keys
   const derVKeys = [{ dataKey: "St_V", name: "V", color: "#10b981" }];
   const derIKeys = [{ dataKey: "St_I", name: "I", color: "#06b6d4" }];
-  // FIX: Power + Freq on one chart (Power 0-3000 dominates scale)
   const derPFrKeys = [{ dataKey: "St_P", name: "Power(W)", color: "#10b981" }, { dataKey: "St_F", name: "Freq(Hz)", color: "#f59e0b" }];
-  // FIX: Reactive Power + PF on one chart (Q 0-2500 dominates scale)
   const derQPFKeys = [{ dataKey: "St_Q", name: "React.Pwr", color: "#a855f7" }, { dataKey: "St_PF", name: "PF", color: "#ec4899" }];
 
   const vFilterOpts = [{ value: "all", label: "All Phases" }, { value: "Va", label: "Phase R" }, { value: "Vb", label: "Phase Y" }, { value: "Vc", label: "Phase B" }];
@@ -917,7 +1121,6 @@ export default function Dashboard() {
   const qFilterOpts = [{ value: "all", label: "All Phases" }, { value: "Qa", label: "Phase R" }, { value: "Qb", label: "Phase Y" }, { value: "Qc", label: "Phase B" }];
   const pf3FilterOpts = [{ value: "all", label: "All Phases" }, { value: "PFa", label: "Phase R" }, { value: "PFb", label: "Phase Y" }, { value: "PFc", label: "Phase B" }];
 
-  /* ── Export handler ── */
   const handleRangeExport = useCallback((chartType, startTime, endTime) => {
     const configs = {
       voltage: { hist: voltageRaw.current, keys: vKeys, yDomain: [Y_LIMITS.voltage.min, Y_LIMITS.voltage.max], yUnit: "V", yLabel: "Voltage (V)", title: "Three Phase Voltages", filename: "three_phase_voltage", accent: "#2563eb" },
@@ -927,13 +1130,43 @@ export default function Dashboard() {
       pf3phase: { hist: pf3Raw.current, keys: pf3Keys, yDomain: [Y_LIMITS.pf3phase.min, Y_LIMITS.pf3phase.max], yUnit: "", yLabel: "Power Factor", title: "Three Phase Power Factors", filename: "three_phase_pf", accent: "#0891b2" },
       derV: { hist: streetRaw.current, keys: derVKeys, yDomain: [Y_LIMITS.derV.min, Y_LIMITS.derV.max], yUnit: "V", yLabel: "DER Voltage (V)", title: "DER Voltage", filename: "der_voltage", accent: "#059669" },
       derI: { hist: streetRaw.current, keys: derIKeys, yDomain: [Y_LIMITS.derI.min, Y_LIMITS.derI.max], yUnit: "A", yLabel: "DER Current (A)", title: "DER Current", filename: "der_current", accent: "#0284c7" },
-      derPFreq: { hist: streetRaw.current, keys: derPFrKeys, yDomain: [Y_LIMITS.derP.min, Y_LIMITS.derP.max], yUnit: "W", yLabel: "Power (W)", title: "DER Power + Frequency", filename: "der_power_freq", accent: "#059669" },
-      derQPF: { hist: streetRaw.current, keys: derQPFKeys, yDomain: [Y_LIMITS.reactive.min, Y_LIMITS.reactive.max], yUnit: "", yLabel: "VAR / PF", title: "DER Reactive Power + PF", filename: "der_reactive_pf", accent: "#7c3aed" },
+      derPFreq: {
+        isDual: true,
+        hist: streetRaw.current,
+        leftKeys: [{ dataKey: "St_P", name: "Power(W)", color: "#10b981" }],
+        rightKeys: [{ dataKey: "St_F", name: "Freq(Hz)", color: "#f59e0b" }],
+        leftDomain: [Y_LIMITS.derP.min, Y_LIMITS.derP.max],
+        rightDomain: [Y_LIMITS.derFreq.min, Y_LIMITS.derFreq.max],
+        leftUnit: "W", rightUnit: "Hz",
+        leftLabel: "Power (W)", rightLabel: "Freq (Hz)",
+        title: "DER Power + Frequency", filename: "der_power_freq", accent: "#059669"
+      },
+      derQPF: {
+        isDual: true,
+        hist: streetRaw.current,
+        leftKeys: [{ dataKey: "St_Q", name: "React.Pwr", color: "#a855f7" }],
+        rightKeys: [{ dataKey: "St_PF", name: "PF", color: "#ec4899" }],
+        leftDomain: [Y_LIMITS.derQPF.min, Y_LIMITS.derQPF.max],
+        rightDomain: [Y_LIMITS.derPF.min, Y_LIMITS.derPF.max],
+        leftUnit: " VAR", rightUnit: "",
+        leftLabel: "Reactive Power (VAR)", rightLabel: "Power Factor",
+        title: "DER Reactive Power + PF", filename: "der_reactive_pf", accent: "#7c3aed"
+      },
     };
     const cfg = configs[chartType];
     if (!cfg) return null;
+
+    if (cfg.isDual) {
+      return exportDualAxisChartPNGByRange(
+        cfg.hist, cfg.leftKeys, cfg.rightKeys,
+        cfg.leftDomain, cfg.rightDomain,
+        cfg.leftUnit, cfg.rightUnit,
+        cfg.leftLabel, cfg.rightLabel,
+        cfg.title, cfg.filename, cfg.accent,
+        startTime, endTime
+      );
+    }
     return exportChartPNGByRange(cfg.hist, cfg.keys, cfg.yDomain, cfg.yUnit, cfg.yLabel, cfg.title, cfg.filename, cfg.accent, startTime, endTime);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const buildChartDataFull = (rawRef, keys) => rawRef.current.map(d => {
@@ -955,10 +1188,8 @@ export default function Dashboard() {
         <div className="absolute left-1/2 bottom-0 w-72 h-72 rounded-full bg-emerald-500/10 blur-[100px]" />
       </div>
 
-      <TimeRangeExportModal
-        isOpen={showExportModal} onClose={() => setShowExportModal(false)}
-        onExport={handleRangeExport} isDark={isDark} rawRef={voltageRaw}
-      />
+      <TimeRangeExportModal isOpen={showExportModal} onClose={() => setShowExportModal(false)}
+        onExport={handleRangeExport} isDark={isDark} rawRef={voltageRaw} />
 
       {/* ══ HEADER ══ */}
       <header className={`rounded-2xl px-6 py-4 mb-6 shadow-xl backdrop-blur-xl border border-white/20 ${isDark ? "bg-white/10" : "bg-white/70"}`}>
@@ -989,7 +1220,6 @@ export default function Dashboard() {
 
         <div className={`border-t mb-3 ${isDark ? "border-white/20" : "border-slate-200"}`} />
 
-        {/* Export buttons */}
         <div className="flex flex-wrap items-center gap-2">
           <span className={`text-xs font-semibold uppercase tracking-wider mr-1 ${isDark ? "text-slate-400" : "text-slate-500"}`}>Export:</span>
           {[
@@ -1000,14 +1230,48 @@ export default function Dashboard() {
             { label: "⬇ PF PNG", bg: "bg-cyan-600 hover:bg-cyan-700", fn: () => exportChartPNG(buildChartDataFull(pf3Raw, pf3Keys), pf3Keys, [Y_LIMITS.pf3phase.min, Y_LIMITS.pf3phase.max], "", "Power Factor", "Three Phase Power Factors", "three_phase_pf", "#0891b2") },
             { label: "⬇ V PNG", bg: "bg-emerald-600 hover:bg-emerald-700", fn: () => exportChartPNG(buildChartDataFull(streetRaw, derVKeys), derVKeys, [Y_LIMITS.derV.min, Y_LIMITS.derV.max], "V", "DER Voltage (V)", "DER Voltage", "der_voltage", "#059669") },
             { label: "⬇ I PNG", bg: "bg-sky-600 hover:bg-sky-700", fn: () => exportChartPNG(buildChartDataFull(streetRaw, derIKeys), derIKeys, [Y_LIMITS.derI.min, Y_LIMITS.derI.max], "A", "DER Current (A)", "DER Current", "der_current", "#0284c7") },
-            { label: "⬇ P+F PNG", bg: "bg-teal-600 hover:bg-teal-700", fn: () => exportChartPNG(buildChartDataFull(streetRaw, derPFrKeys), derPFrKeys, [Y_LIMITS.derP.min, Y_LIMITS.derP.max], "W", "Power (W)", "DER Power + Frequency", "der_power_freq", "#0d9488") },
-            { label: "⬇ Q+PF PNG", bg: "bg-fuchsia-600 hover:bg-fuchsia-700", fn: () => exportChartPNG(buildChartDataFull(streetRaw, derQPFKeys), derQPFKeys, [Y_LIMITS.reactive.min, Y_LIMITS.reactive.max], "", "VAR / PF", "DER Reactive Power + PF", "der_reactive_pf", "#7c3aed") },
-          ].map(btn => (
-            <button key={btn.label} onClick={btn.fn}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold text-white shadow-sm hover:scale-105 transition-all ${btn.bg}`}>
-              {btn.label}
-            </button>
-          ))}
+            // Replace ⬇ P+F PNG button fn:
+            {
+              label: "⬇ P+F PNG", bg: "bg-teal-600 hover:bg-teal-700",
+              fn: () => {
+                const allKeys = [...derPFrKeys];
+                const cd = buildChartDataFull(streetRaw, allKeys);
+                exportDualAxisChartPNG(
+                  cd,
+                  [{ dataKey: "St_P", name: "Power(W)", color: "#10b981" }],
+                  [{ dataKey: "St_F", name: "Freq(Hz)", color: "#f59e0b" }],
+                  [Y_LIMITS.derP.min, Y_LIMITS.derP.max],
+                  [Y_LIMITS.derFreq.min, Y_LIMITS.derFreq.max],
+                  "W", "Hz",
+                  "Power (W)", "Freq (Hz)",
+                  "DER Power + Frequency", "der_power_freq", "#0d9488"
+                );
+              }
+            },
+
+            // Replace ⬇ Q+PF PNG button fn:
+            {
+              label: "⬇ Q+PF PNG", bg: "bg-fuchsia-600 hover:bg-fuchsia-700",
+              fn: () => {
+                const allKeys = [...derQPFKeys];
+                const cd = buildChartDataFull(streetRaw, allKeys);
+                exportDualAxisChartPNG(
+                  cd,
+                  [{ dataKey: "St_Q", name: "React.Pwr", color: "#a855f7" }],
+                  [{ dataKey: "St_PF", name: "PF", color: "#ec4899" }],
+                  [Y_LIMITS.derQPF.min, Y_LIMITS.derQPF.max],
+                  [Y_LIMITS.derPF.min, Y_LIMITS.derPF.max],
+                  " VAR", "",
+                  "Reactive Power (VAR)", "Power Factor",
+                  "DER Reactive Power + PF", "der_reactive_pf", "#7c3aed"
+                );
+              }
+            },].map(btn => (
+              <button key={btn.label} onClick={btn.fn}
+                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold text-white shadow-sm hover:scale-105 transition-all ${btn.bg}`}>
+                {btn.label}
+              </button>
+            ))}
           <div className={`w-px h-6 mx-1 hidden sm:block ${isDark ? "bg-white/20" : "bg-slate-300"}`} />
           <button onClick={() => setShowExportModal(true)}
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-violet-600 hover:bg-violet-700 text-white shadow-sm hover:scale-105 transition-all">
@@ -1025,9 +1289,9 @@ export default function Dashboard() {
       <main className="grid grid-cols-1 lg:grid-cols-4 gap-5 items-stretch">
         <section className="lg:col-span-3 space-y-5">
 
-          {/* ── 3-Phase KPI cards ── */}
+          {/* 3-Phase KPI */}
           <div className={`rounded-2xl p-4 ${sectionBg} border border-white/20 space-y-3`}>
-            <h2 className={`text-l   // bigger font-bold uppercase tracking-widest ${h2Color}`}>⚡ 3-Phase Metrics</h2>
+            <h2 className={`text-l font-bold uppercase tracking-widest ${h2Color}`}>⚡ 3-Phase Metrics</h2>
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">{voltageCards.map((c, i) => <SmallCard key={i} {...c} />)}</div>
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">{currentCards.map((c, i) => <SmallCard key={i} {...c} />)}</div>
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">{powerCards.map((c, i) => <SmallCard key={i} {...c} />)}</div>
@@ -1035,14 +1299,13 @@ export default function Dashboard() {
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">{pf3Cards.map((c, i) => <SmallCard key={i} {...c} />)}</div>
           </div>
 
-          {/* ── DER section — 6 cards (added Reactive Power) ── */}
+          {/* DER KPI */}
           <div className={`rounded-2xl p-4 ${sectionBg} border border-white/20 space-y-3`}>
-            <h2 className={`text-l   // bigger font-bold uppercase tracking-widest ${h2Color}`}>🌿 DER-Integrated Dynamic Phase Reconfiguration Feeder</h2>
-            {/* FIX: 6 cards now — 3 cols on sm, 6 on lg */}
+            <h2 className={`text-l font-bold uppercase tracking-widest ${h2Color}`}>🌿 DER-Integrated Dynamic Phase Reconfiguration Feeder</h2>
             <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">{streetCards.map((c, i) => <SmallCard key={i} {...c} />)}</div>
           </div>
 
-          {/* ── 3-Phase Graphs ── */}
+          {/* 3-Phase charts */}
           <ChartPanel id="chartVoltage" title="Three Phase Voltages"
             titleClass="bg-gradient-to-r from-blue-500 to-purple-500"
             keys={vKeys} filterOptions={vFilterOpts} data={voltageHist}
@@ -1073,35 +1336,42 @@ export default function Dashboard() {
             yLabel="Power Factor" yUnit="" refVal={1}
             yMin={Y_LIMITS.pf3phase.min} yMax={Y_LIMITS.pf3phase.max} isDark={isDark} />
 
-          {/* ── DER Graphs — FIX: split into 4 separate clear charts ── */}
-
-          {/* DER Voltage: 210–260V — clear continuous line */}
+          {/* DER charts */}
           <ChartPanel id="chartDerV" title="DER-Integrated Dynamic Phase Reconfiguration Feeder Voltage"
             titleClass="bg-gradient-to-r from-emerald-500 to-teal-500"
             keys={derVKeys} filterOptions={null} data={streetHist}
             yLabel="Voltage (V)" yUnit="V" refVal={null}
             yMin={Y_LIMITS.derV.min} yMax={Y_LIMITS.derV.max} isDark={isDark} />
 
-          {/* DER Current: 0–10A — its own axis so it doesn't get squashed */}
           <ChartPanel id="chartDerI" title="DER-Integrated Dynamic Phase Reconfiguration Feeder Current"
             titleClass="bg-gradient-to-r from-teal-500 to-cyan-500"
             keys={derIKeys} filterOptions={null} data={streetHist}
             yLabel="Current (A)" yUnit="A" refVal={null}
             yMin={Y_LIMITS.derI.min} yMax={Y_LIMITS.derI.max} isDark={isDark} />
 
-          {/* FIX: DER Power + Frequency — one chart, Power dominates (0-3000W) */}
-          <ChartPanel id="chartDerPFreq" title="DER-Integrated Dynamic Phase Reconfiguration Feeder Power · Frequency"
+          {/* DUAL-AXIS: Power (left) + Frequency (right) */}
+          <DualAxisChartPanel
+            id="chartDerPFreq"
+            title="DER-Integrated Dynamic Phase Reconfiguration Feeder Power · Frequency"
             titleClass="bg-gradient-to-r from-green-500 to-emerald-500"
-            keys={derPFrKeys} filterOptions={null} data={streetHist}
-            yLabel="Power (W) / Freq (Hz)" yUnit="" refVal={null}
-            yMin={Y_LIMITS.derP.min} yMax={Y_LIMITS.derP.max} isDark={isDark} />
+            leftKeys={[{ dataKey: "St_P", name: "Power(W)", color: "#10b981" }]}
+            rightKeys={[{ dataKey: "St_F", name: "Freq(Hz)", color: "#f59e0b" }]}
+            data={streetHist}
+            leftLabel="Power (W)" leftMin={Y_LIMITS.derP.min} leftMax={Y_LIMITS.derP.max} leftUnit="W"
+            rightLabel="Freq (Hz)" rightMin={Y_LIMITS.derFreq.min} rightMax={Y_LIMITS.derFreq.max} rightUnit="Hz"
+            isDark={isDark} />
 
-          {/* FIX: DER Reactive Power + PF — one chart, Q dominates (0-2500 VAR) */}
-          <ChartPanel id="chartDerQPF" title="DER-Integrated Dynamic Phase Reconfiguration Feeder Reactive Power · Power Factor"
+          {/* DUAL-AXIS: Reactive Power (left) + Power Factor (right) */}
+          <DualAxisChartPanel
+            id="chartDerQPF"
+            title="DER-Integrated Dynamic Phase Reconfiguration Feeder Reactive Power · Power Factor"
             titleClass="bg-gradient-to-r from-fuchsia-500 to-purple-500"
-            keys={derQPFKeys} filterOptions={null} data={streetHist}
-            yLabel="VAR / PF" yUnit="" refVal={null}
-            yMin={Y_LIMITS.derQPF.min} yMax={Y_LIMITS.derQPF.max} isDark={isDark} />
+            leftKeys={[{ dataKey: "St_Q", name: "React.Pwr", color: "#a855f7" }]}
+            rightKeys={[{ dataKey: "St_PF", name: "PF", color: "#ec4899" }]}
+            data={streetHist}
+            leftLabel="VAR" leftMin={Y_LIMITS.derQPF.min} leftMax={Y_LIMITS.derQPF.max} leftUnit=" VAR"
+            rightLabel="PF" rightMin={Y_LIMITS.derPF.min} rightMax={Y_LIMITS.derPF.max} rightUnit=""
+            isDark={isDark} />
 
         </section>
         <aside className="lg:col-span-1 flex flex-col"><EventLog events={events} /></aside>

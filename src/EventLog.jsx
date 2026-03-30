@@ -5,7 +5,7 @@ function Badge({ level }) {
     success: { background: 'rgba(16,185,129,0.15)', border: '1px solid rgba(16,185,129,0.4)', color: '#059669' },
     warning: { background: 'rgba(245,158,11,0.15)', border: '1px solid rgba(245,158,11,0.4)', color: '#d97706' },
     critical: { background: 'rgba(239,68,68,0.15)', border: '1px solid rgba(239,68,68,0.4)', color: '#dc2626' },
-    info:     { background: 'rgba(99,102,241,0.12)', border: '1px solid rgba(99,102,241,0.35)', color: '#6366f1' },
+    info: { background: 'rgba(99,102,241,0.12)', border: '1px solid rgba(99,102,241,0.35)', color: '#6366f1' },
   };
   const label = level === 'success' ? 'OK' : level === 'warning' ? 'WARN' : level === 'critical' ? 'ALERT' : 'INFO';
   const s = styles[level] || styles.info;
